@@ -1,0 +1,2994 @@
+---
+title: "R Script sea urchin's microbiota"
+author: "Pau Bernadó"
+date: "2025-11-20"
+output: html_document
+---
+
+Below is the R script used for the analyses performed after sequence data had been processed with the QIIME2 pipeline. This code integrates the steps for importing, exploring and statistically analysing the resulting data tables to characterise the sea urchin microbiota.
+
+### Microbiome Data Pre-processing in R
+
+This section details the R-based workflow used to import QIIME2-processed artifacts, construct the *phyloseq* object and perform initial quality checks. It includes taxonomy cleaning, removal of contaminants using *decontam*, and standardisation of sample and feature tables. The processed dataset is then prepared for downstream analyses, including rarefaction and taxonomic aggregation.
+
+```{r}
+#source('http://bioconductor.org/biocLite.R')
+#biocLite('phyloseq')
+library("phyloseq")
+#biocLite("biomformat")
+library("biomformat")
+#install.packages("ggplot2")
+library("ggplot2")
+#install.packages("ggpubr")
+library("ggpubr")
+#install.packages("RColorBrewer")
+library("RColorBrewer")
+#install.packages("vegan")
+library("vegan")
+#install.packages("grid")
+library("grid")
+#install.packages("rstatix")
+library(rstatix)
+#install.packages("magrittr")
+library(magrittr)
+library(dplyr)
+library(plyr)
+library(broom)
+library('stringr')
+#if (!requireNamespace("devtools", quietly = TRUE)){install.packages("devtools")}
+#devtools::install_github("jbisanz/qiime2R")
+library('qiime2R')
+#devtools::install_github("microbiome/microbiome") # Install the package
+library('decontam')
+library(microbiome)
+#devtools::install_github("pmartinezarbizu/pairwiseAdonis/pairwiseAdonis")
+library(pairwiseAdonis)
+#devtools::install_github("microsud/microbiomeutilities")
+library(microbiomeutilities)
+#install.packages("wesanderson")
+library(wesanderson)
+#install.packages("eulerr")
+library(eulerr)
+#install.packages("picante")
+library(picante)
+#if (!requireNamespace("BiocManager", quietly = TRUE))
+#    install.packages("BiocManager")
+#BiocManager::install("ANCOMBC")
+library(ANCOMBC)
+library(tidyr)
+#install.packages("ggvenn")
+library(ggvenn)
+#install.packages("lmPerm")
+library(lmPerm)
+#install.packages("phytools")
+library(phytools)
+#install.packages("RVAideMemoire")
+library(RVAideMemoire)
+
+
+# we can also import the qza artifacts from qiime2 directly with qiime2R
+#follow this : https://github.com/jbisanz/qiime2R
+
+library(biomformat)
+library(phyloseq)
+
+#Add biome table, tree and metadata
+biom_data <- import_biom(BIOMfilename = "table-with-taxonomyv2.biom", 
+                         treefilename = "tree.nwk")
+mapping_file <- import_qiime_sample_data(mapfilename = "metadata_final.tsv")
+
+# Merge the OTU and mapping data into a phyloseq object
+
+phylo <- merge_phyloseq(biom_data, mapping_file)
+
+# Add names to biom table and check phyloseq objects
+
+colnames(tax_table(phylo))= c("Kingdom","Phylum","Class","Order","Family","Genus", "Species")
+rank_names(phylo)
+
+# Path to your exported FASTA file
+fasta_path <- "dna-sequences.fasta"
+rep_seqs <- Biostrings::readDNAStringSet(fasta_path)
+
+# Add sequences to the phyloseq object
+phylo <- phyloseq::merge_phyloseq(phylo, refseq(rep_seqs))
+
+# Start to explore the data a bit 
+# number of samples
+nsamples(phylo)
+
+# number of sequence variants
+ntaxa(phylo)
+
+# summary statistics of sampling depth
+depths <- sample_sums(phylo)
+summary(depths)
+
+# We see that we have samples with a very low sequencing depth > we can remove the sample
+otu_tab <- t(abundances(phylo))
+p <- vegan::rarecurve(otu_tab, 
+                      step = 50, label = FALSE, 
+                      sample = min(rowSums(otu_tab), 
+                                   col = "blue", cex = 0.6))
+p
+
+
+# Remove contaminants with decontam package
+sample_data(phylo)$is.neg <- sample_data(phylo)$Species.name %in% c(
+  "Extraccion control",
+  "PCR Negative control")
+
+contamdf.prev <- isContaminant(phylo, method="prevalence", neg="is.neg", threshold =0.2)
+table(contamdf.prev$contaminant)
+
+# Make phyloseq object of presence-absence in negative controls and true samples
+ps.pa <- transform_sample_counts(phylo, function(abund) 1*(abund>0))
+
+# define negative labels
+neg_labels <- c("Extraccion control", "PCR Negative control")
+
+# Negative (only control)
+ps.pa.neg <- prune_samples(sample_data(phylo)$Species.name %in% neg_labels, phylo)
+
+# Positive (sample pool)
+ps.pa.pos <- prune_samples(!(sample_data(phylo)$Species.name %in% neg_labels), phylo)
+
+# Make data.frame of prevalence in positive and negative samples
+df.pa <- data.frame(pa.pos=taxa_sums(ps.pa.pos), pa.neg=taxa_sums(ps.pa.neg),
+                      contaminant=contamdf.prev$contaminant)
+ggplot(data=df.pa, aes(x=pa.neg, y=pa.pos, color=contaminant)) + geom_point() +
+  xlab("Prevalence (Negative Controls)") + ylab("Prevalence (True Samples)")
+
+# Extract contaminants
+phylo <- prune_taxa(!contamdf.prev$contaminant, phylo)
+
+# Taxa bar plots
+microbiome::summarize_phyloseq(phylo)
+
+otu_tab <- microbiome::abundances(phylo)
+otu_tab[1:5,1:5]
+
+tax_tab <- phyloseq::tax_table(phylo)
+tax_tab[1:5,1:5]
+
+# Clean taxonomy table 
+# Taxonomy ranks with proper names 
+tax_table_clean <- tax_table(phylo)
+
+# Remove prefixes d__, p__, etc.
+tax_table_clean <- apply(tax_table_clean, 2, function(x) gsub("^[a-z]__", "", x))
+
+# Assign the cleaned table back to the phyloseq object
+tax_table(phylo) <- tax_table_clean
+phyloseq::tax_table(phylo)[1:3,1:3]
+
+# ASV names from dada are long - change to ASVX... 
+taxa_names(phylo)[1:5]
+taxa_names(phylo) <- paste0("ASV", seq(ntaxa(phylo)))
+
+# Remove special characters
+tax_table(phylo)[,colnames(tax_table(phylo))] <- gsub(tax_table(phylo)[,colnames(tax_table(phylo))],pattern="=*",replacement="")
+
+# remove asterisk
+tax_table(phylo)[,colnames(tax_table(phylo))] <- gsub(tax_table(phylo)[,colnames(tax_table(phylo))],pattern="[*]",replacement="") # notice here the square brackets. These are required when special characters such as * and ~ below are used as they have functional role in R base programming. 
+
+# remove ~
+tax_table(phylo)[,colnames(tax_table(phylo))] <- gsub(tax_table(phylo)[,colnames(tax_table(phylo))],pattern="[~]",replacement="")
+
+# Update column name Domain instead of Kingdom (for core microbiome)
+tax_df <- as.data.frame(tax_table(phylo))  # Extract the taxonomy table
+colnames(tax_df)[colnames(tax_df) == "Kingdom"] <- "Domain"  # Rename Kingdom to Domain
+tax_table(phylo) <- as.matrix(tax_df)  # Update the phyloseq object
+
+# All samples at Phylum level 
+# Subset samples
+keep_species <- c("Arbacia lixula", "Paracentrotus lividus","Water sample")
+
+#Subset of samples
+phylo <- subset_samples(
+  phylo,
+  Species.name %in% keep_species &
+    (is.na(is.neg) | is.neg == FALSE)
+)
+
+# Subset samples with total reads > 5000
+phylo2 <- prune_samples(sample_sums(phylo) > 5000, phylo)
+phylo.pruned <- prune_taxa(taxa_sums(phylo2) >0, phylo2)
+
+# merge all taxa that are detected rare
+phylum.data <- aggregate_rare(phylo.pruned, level="Phylum", detection = 0.1, prevalence = 0.5)
+
+# Relative abundances
+phylum.data.rel<- microbiome::transform(phylum.data, "compositional")
+
+# Long format amb metadata and taxonomy
+df <- psmelt(phylum.data.rel)   # always: Sample, Abundance, Phylum, Species.name, etc.
+
+# Short labels "_"
+df$Sample_short <- sub("_.*", "", df$Sample)
+
+# Sort samples (if you have a column "order" in metadata)
+if ("order" %in% colnames(df)) {
+  df <- df %>% arrange(orden)
+  df$Sample_short <- factor(df$Sample_short, levels = df %>% distinct(Sample_short, orden) %>% pull(Sample_short))
+} else {
+  message("⚠️  'orde rdoesn't exist in metadata; maintains original order.")
+}
+
+# Facet by species (and Water samples) and barplot by Phylum
+plot.phylum <- ggplot(df, aes(x = Sample_short, y = Abundance, fill = Phylum)) +
+  geom_col() +
+  facet_wrap(~ Species.name, scales = "free_x", nrow = 1) +
+  labs(x = "Sample (prefix)", y = "Relative abundance", fill = "Phylum") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+        axis.ticks.x = element_line())
+
+# Custom palette (if you have it)
+if (exists("marine_palette")) {
+  plot.phylum <- plot.phylum + scale_fill_manual(values = marine_palette, name = "Phylum")
+}
+
+plot.phylum
+# Count phyla
+n_phyla <- length(unique(tax_table(phylum.data)[, "Phylum"]))
+
+# Generate a long palette
+marine_palette <- c("#005F73",  "#0A9396", "#94D2BD", "#1B4332", "#76C893",  "#FFB703", 
+"#E09F3E",  "#CA6702", "#BB3E03",  "#9B2226", "#EE4266",  "#8A508F", "#5A189A",  "#7F4F24",  "#6C757D"  )
+
+
+# All samples at Family level 
+family.data <- aggregate_rare(phylo.pruned, level="Family", detection = 0.1, prevalence = 0.5)
+
+# All samples at Genus level 
+genus.data<-aggregate_rare(phylo.pruned, level="Genus", detection = 0.1, prevalence = 0.5)
+
+# Rarefactation, removing outliers
+
+# Rarefy 6000 reads 
+set.seed(9242)  # This will help in reproducing the filtering and nomalisation.
+phylo.rare <- rarefy_even_depth(phylo.pruned, sample.size = 6000)
+```
+
+### Computation of Alpha Diversity Metrics
+
+This section computes multiple alpha diversity indices, including observed richness, Shannon diversity and Faith’s phylogenetic diversity. Diversity values are derived from the rarefied *phyloseq* object and combined with sample metadata to generate an integrated alpha-diversity table.
+
+```{r}
+# Alpha diversity indices 
+phylo.adiv <- alpha(phylo.rare, index = "all")
+
+phylo.meta<- meta(phylo.rare)  
+
+phylo.rare.asvtab <- as.data.frame(phylo.rare@otu_table)
+
+phylo.rare.tree <- phylo.rare@phy_tree
+
+phylo.rare.pd <- pd(t(phylo.rare.asvtab), phylo.rare.tree, include.root=F)
+
+phylo.adiv$Phylogenetic_Diversity <- phylo.rare.pd$PD
+
+Alpha.diversity<- rbind(
+  data.frame(
+    sample.id = phylo.meta$X.SampleID,
+    Species.name = phylo.meta$Species.name,
+    Location = phylo.meta$Location,
+    Seasonality= phylo.meta$Seasonality..sampling.effort.order.,
+    Impact=phylo.meta$Anthropic.influence,
+    observed = phylo.adiv$observed,
+    shannon = phylo.adiv$diversity_shannon,
+    phylogenetic_diversity = phylo.adiv$Phylogenetic_Diversity
+  ))
+
+Alpha.diversity$Sample_short <- sub("_.*", "", Alpha.diversity$sample.id)
+```
+
+### Alpha Diversity Modelling and Visualisation for *Arbacia lixula*
+
+This section recodes metadata factors and subsets the dataset to *Arbacia lixula* before fitting Type III linear models to test the effects of Seasonality, Location and nested Impact on alpha diversity metrics (observed richness, Shannon index and Faith’s PD). Pairwise comparisons are computed using *emmeans* to evaluate differences within locations and seasonal blocks. The results are visualised through faceted boxplots using a custom seasonal colour palette to highlight patterns across environmental and temporal gradients.
+
+```{r}
+library(dplyr)
+library(emmeans)
+library(car)       
+
+# Sum contrasts for Type III
+options(contrasts = c("contr.sum","contr.poly"))
+
+
+## Subset Arbacia
+df_A <- Alpha.diversity %>%
+  filter(Species.name == "Arbacia lixula") %>%
+  droplevels()
+
+# Anova(type = 3)
+# NESTED MODEL Seasonality * Location/Impact
+
+# SHANNON 
+m_A_sha <- lm(shannon ~ Seasonality * Location/Impact, data = df_A)
+Anova(m_A_sha, type = 3)
+
+# Pairwise Seasonality inside each Location (respects interaction)
+emm_A_season_by_loc_sha <- emmeans(m_A_sha, ~ Seasonality | Location)
+pairs(emm_A_season_by_loc_sha, adjust = "tukey")
+
+# Pairwise Impact inside each Location and Seasonality (respects nesting + interaction)
+emm_A_imp_by_loc_seas_sha <- emmeans(m_A_sha, ~ Impact | Location:Seasonality)
+pairs(emm_A_imp_by_loc_seas_sha, adjust = "BH")  
+
+# OBSERVED RICHNESS 
+m_A_obs <- lm(observed ~ Seasonality * Location/Impact, data = df_A)
+Anova(m_A_obs, type = 3)
+
+# Pairwise Seasonality inside each Location (respects interaction)
+emm_A_season_by_loc_obs <- emmeans(m_A_obs, ~ Seasonality | Location)
+pairs(emm_A_season_by_loc_obs, adjust = "tukey")
+
+# Pairwise Impact inside each Location and Seasonality (respects nesting + interaction)
+emm_A_imp_by_loc_seas_obs <- emmeans(m_A_obs, ~ Impact | Location:Seasonality)
+pairs(emm_A_imp_by_loc_seas_obs, adjust = "BH")
+
+# FAITH’S PHYLOGENETIC DIVERSITY (PD) 
+m_A_pd <- lm(phylogenetic_diversity ~ Seasonality * Location/Impact, data = df_A)
+Anova(m_A_pd, type = 3)
+
+# Pairwise Seasonality inside each Location (respects interaction)
+emm_A_season_by_loc_pd <- emmeans(m_A_pd, ~ Seasonality | Location)
+pairs(emm_A_season_by_loc_pd, adjust = "tukey")
+
+# Pairwise Impact inside each Location and Seasonality (respects nesting + interaction)
+emm_A_imp_by_loc_seas_pd <- emmeans(m_A_pd, ~ Impact | Location:Seasonality)
+pairs(emm_A_imp_by_loc_seas_pd, adjust = "BH")
+
+# Color palette seasonality
+season_pal <- c(
+  "Spring" = "#4DAF4A",  
+  "Autumn" = "#E69F00",  
+  "Winter" = "#0072B2"   
+)
+
+# Filter only A. lixula, prep data
+df_A <- df_A %>%
+  filter(Species.name == "Arbacia lixula") %>%
+  mutate(
+    Block = interaction(Location, Impact, sep = " — ", drop = TRUE),
+    Seasonality = factor(Seasonality, levels = c("Spring", "Autumn", "Winter")),
+    Impact      = factor(Impact, levels = c("Lower-Impact", "Higher-impact"))
+  )
+
+# Function to create Boxplots
+make_box <- function(yvar, ylab, title_expr) {
+  ggboxplot(
+    df_A,
+    x = "Seasonality",
+    y = yvar,
+    color = "Seasonality",
+    palette = season_pal,   
+    add = "jitter",
+    facet.by = "Block",
+    nrow = 1,
+    outlier.shape = NA
+  ) +
+    labs(x = NULL, y = ylab, title = title_expr) +
+    theme(
+      strip.text = element_text(face = "bold"),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank()
+    )
+}
+
+# Graphics
+p_obs  <- make_box("observed", "Observed richness",
+                   expression(italic("A. lixula") ~ " — Observed richness across seasons by block"))
+p_shan <- make_box("shannon", "Shannon diversity (H')",
+                   expression(italic("A. lixula") ~ " — Shannon diversity across seasons by block"))
+p_pd   <- make_box("phylogenetic_diversity", "Faith's phylogenetic diversity",
+                   expression(italic("A. lixula") ~ " — Phylogenetic diversity across seasons by block"))
+
+# Final composition graphics
+ggarrange(p_obs, p_shan, p_pd, ncol = 1, nrow = 3, common.legend = TRUE, legend = "right")
+```
+
+### Beta Diversity Analyses for *Arbacia lixula*: UniFrac-Based PCoA Ordinations
+
+This section characterises beta-diversity patterns in *Arbacia lixula* using PCoA ordinations computed from Weighted and Unweighted UniFrac distances. Seasonal, spatial and impact-driven structure is visualised through colour- and fill-coded ordination plots. Nested PERMANOVA models further evaluate the contributions of Seasonality, Location and anthropogenic Impact to overall community dissimilarity.
+
+```{r}
+# Filter Arbacia 
+psA <- subset_samples(phylo.rare, Species.name %in% c("Arbacia lixula","A. lixula"))
+psA <- prune_samples(sample_names(psA), psA)  # clean
+
+# Relabel sample_data
+metaA <- data.frame(sample_data(psA)) %>%
+  mutate(
+    Impact = dplyr::recode(as.character(Anthropic.influence),
+                           "Non Contaminated" = "Lower-impact",
+                           "Contaminated"     = "Higher-impact",
+                           .default = NA_character_),
+    Impact = factor(Impact, levels = c("Lower-impact","Higher-impact")),
+
+    Seasonality = dplyr::recode(as.character(`Seasonality..sampling.effort.order.`),
+                                "First"  = "Spring",
+                                "Second" = "Autumn",
+                                "Third"  = "Winter",
+                                .default = NA_character_),
+    Seasonality = factor(Seasonality, levels = c("Spring","Autumn","Winter")),
+
+    Location = factor(Location)
+  )
+
+# Work with relative abundance 
+psA.rel <- microbiome::transform(psA, "compositional")
+
+# ORDINATIONS (PCoA)  
+# Weighted UniFrac
+ordA_w <- ordinate(psA.rel, method = "PCoA", distance = "wunifrac")
+
+# Unweighted UniFrac
+ordA_u <- ordinate(psA.rel, method = "PCoA", distance = "unifrac")
+
+# Barplots eigenvalues
+par(mfrow=c(1,2))
+barplot(ordA_w$values$Eigenvalues[1:10], main="Weighted UniFrac eig.")
+barplot(ordA_u$values$Eigenvalues[1:10], main="Unweighted UniFrac eig.")
+par(mfrow=c(1,1))
+
+# PLOTS 
+# Weighted: color = Seasonality, shape = Location
+p_w <- plot_ordination(psA.rel, ordA_w, color = "Seasonality", shape = "Location") +
+  ggtitle("PCoA — Weighted UniFrac (Arbacia)") +
+  geom_point(size = 3, alpha = 0.9) +
+  theme_classic()
+
+# Unweighted: color = Impact, shape = Location
+p_u <- plot_ordination(psA.rel, ordA_u, color = "Impact", shape = "Location") +
+  ggtitle("PCoA — Unweighted UniFrac (Arbacia)") +
+  geom_point(size = 3, alpha = 0.9) +
+  theme_classic()
+
+print(p_w); print(p_u)
+
+# DISTANCE MATRIX
+distA_w <- phyloseq::distance(psA.rel, method = "wunifrac")
+distA_u <- phyloseq::distance(psA.rel, method = "unifrac")
+
+
+# PERMANOVA (Nested) 
+set.seed(123)
+ctrl_loc <- how(nperm = 999, blocks = metaA$Location)  # constrain permutations within Location
+perm_w_nested <- adonis2(
+  distA_w ~ Seasonality *  Location/Impact,
+  data = metaA,
+  permutations = ctrl_loc,
+  by = "terms"
+)
+print(perm_w_nested)
+
+# Seasonality within Location (permutations blocked within Location)
+pw_w_season_given_loc <- pairwise.adonis2(
+  distA_w ~ Seasonality,
+  data   = metaA,
+  strata = "Location",
+  p.adjust.m = "BH",
+  nperm = 999
+)
+
+# Impact within Location (Impact is nested in Location → test within Location)
+pw_w_impact_given_loc <- pairwise.adonis2(
+  distA_w ~ Impact,
+  data   = metaA,
+  strata = "Location",
+  p.adjust.m = "BH",
+  nperm = 999
+)
+
+
+# Impact within Seasonality × Location
+
+library(pairwiseAdonis)
+
+# Subsets (Seasonality × Location)
+grp <- with(metaA, interaction(Seasonality, Location, drop = TRUE))
+
+pw_w_impact_given_season_loc <- lapply(levels(grp), function(g) {
+  idx <- which(grp == g)
+
+  # If< 2 Impact levels within subset, skim
+  if (length(unique(metaA$Impact[idx])) < 2L) {
+    return(sprintf("Omet: %s (menys de 2 nivells d'Impact)", g))
+  }
+
+  # Subdistance coherent with subset 
+  sub_dist <- as.dist(as.matrix(distA_w)[idx, idx])
+
+  # Subdata
+  sub_data <- metaA[idx, , drop = FALSE]
+
+  # Pairwise within Seasonality × Location
+  pairwise.adonis2(
+    sub_dist ~ Impact,
+    data       = sub_data,
+    p.adjust.m = "BH",
+    nperm      = 999
+  )
+})
+
+names(pw_w_impact_given_season_loc) <- levels(grp)
+
+pw_w_impact_given_season_loc
+
+
+#PLOT WEIGHTED
+
+library(phyloseq)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(ggnewscale)
+
+# Data
+ps_src <- if (exists("phylo.rare")) phylo.rare else phylo
+
+# Filter Arbacia
+psA <- subset_samples(ps_src, Species.name %in% c("Arbacia lixula", "A. lixula"))
+psA <- prune_samples(sample_sums(psA) > 0, psA)
+psA <- prune_taxa(taxa_sums(psA) > 0, psA)
+
+# Build Data frame
+sdA <- data.frame(sample_data(psA))
+
+# Seasonality: if nededed... 'Seasonality..sampling.effort.order.' → Spring/Autumn/Winter
+if (!"Seasonality" %in% names(sdA) && "Seasonality..sampling.effort.order." %in% names(sdA)) {
+  sdA$Seasonality <- dplyr::recode(
+    as.character(sdA$Seasonality..sampling.effort.order.),
+    "First" = "Spring", "Second" = "Autumn", "Third" = "Winter",
+    .default = NA_character_
+  )
+}
+sdA$Seasonality <- factor(sdA$Seasonality, levels = c("Winter","Spring","Autumn"))
+
+# Impact: if needed... d'Anthropic.influence → Lower-impact / Higher-impact
+if (!"Impact" %in% names(sdA) && "Anthropic.influence" %in% names(sdA)) {
+  sdA$Impact <- dplyr::recode(
+    as.character(sdA$Anthropic.influence),
+    "Non Contaminated" = "Lower-impact",
+    "Contaminated"     = "Higher-impact",
+    .default = NA_character_
+  )
+}
+sdA$Impact <- factor(sdA$Impact, levels = c("Lower-impact","Higher-impact"))
+
+# Write object
+sample_data(psA)$Seasonality <- sdA$Seasonality
+sample_data(psA)$Impact      <- sdA$Impact
+
+# Season palette
+if (!exists("season_pal")) {
+  season_pal <- c(Winter = "#4C78A8", Spring = "#72B7B2", Autumn = "#F58518")
+}
+
+# Transform to relative (to visualize)
+psA.rel <- microbiome::transform(psA, "compositional")
+
+## 2) PCoA Weighted UniFrac
+ordA_w <- ordinate(psA.rel, method = "PCoA", distance = "wunifrac")
+
+# Percentatge by axis (explained)
+rel <- ordA_w$values$Relative_eig
+if (is.null(rel)) rel <- ordA_w$values$Eigenvalues / sum(ordA_w$values$Eigenvalues)
+ax1 <- round(100 * rel[1], 1)
+ax2 <- round(100 * rel[2], 1)
+
+# Data for ggplot and layers
+pdat <- plot_ordination(psA.rel, ordA_w, type = "samples")$data
+pdat$Seasonality <- factor(pdat$Seasonality, levels = c("Winter","Spring","Autumn"))
+pdat$Impact      <- factor(pdat$Impact, levels = c("Lower-impact","Higher-impact"))
+pdat_hi <- dplyr::filter(pdat, Impact == "Higher-impact")
+
+# Shapes by Location (21–25)
+loc_levels <- levels(sample_data(psA.rel)$Location)
+if (is.null(loc_levels)) loc_levels <- unique(pdat$Location)
+base_shapes <- c(21, 24, 22, 25, 23)  
+shape_vals <- setNames(base_shapes[seq_len(min(length(base_shapes), length(loc_levels)))], loc_levels)
+
+# Plot: color = Season, shape = Location, filled (same color) only Higher-impact + llegend dummy Impact
+p_pcoa_w <- ggplot(pdat, aes(Axis.1, Axis.2)) +
+  # Ellipses 95% per Season
+  stat_ellipse(aes(color = Seasonality, group = Seasonality),
+               type = "norm", level = 0.95, linewidth = 0.8) +
+  # Base layer: empty points (outline = Season), shape = Location
+  geom_point(aes(color = Seasonality, shape = Location),
+             size = 3, stroke = 0.9, fill = NA, alpha = 0.95) +
+  # Overlay: same shape/outline by filled same color for Higher-impact
+  geom_point(data = pdat_hi,
+             aes(color = Seasonality, fill = Seasonality, shape = Location),
+             size = 3, stroke = 0.9, alpha = 0.95) +
+  scale_color_manual(values = season_pal, breaks = c("Winter","Spring","Autumn"), name = "Season") +
+  scale_fill_manual(values = season_pal, guide = "none") +
+  scale_shape_manual(values = shape_vals, name = "Location") +
+  labs(
+    title = expression(italic("Arbacia lixula") ~ " — PCoA (Weighted UniFrac)"),
+    x = paste0("PCoA1 (", ax1, "%)"),
+    y = paste0("PCoA2 (", ax2, "%)")
+  ) +
+  theme_classic(base_size = 12) +
+  theme(plot.title = element_text(face = "bold"))
+
+# Legend Impact (empty vs filled) 
+p_pcoa_w <- p_pcoa_w +
+  ggnewscale::new_scale_fill() +
+  geom_point(
+    data = pdat,
+    aes(fill = Impact),    
+    shape = 21, color = "black",
+    size = 3, alpha = 0,   
+    inherit.aes = TRUE
+  ) +
+  scale_fill_manual(
+    values = c("Lower-impact" = "white", "Higher-impact" = "black"),
+    breaks = c("Lower-impact","Higher-impact"),
+    name   = "Impact"
+  ) +
+  guides(fill = guide_legend(override.aes = list(alpha = 1, shape = 21, size = 3, color = "black")))
+
+# Show plot
+p_pcoa_w
+
+
+
+##UNWEIGHTED
+
+set.seed(123)
+ctrl_loc <- how(nperm = 999, blocks = metaA$Location)  # constrain permutations within Location
+perm_u_nested <- adonis2(
+  distA_u  ~ Seasonality * Location/Impact,
+  data = metaA,
+  permutations = ctrl_loc,
+  by = "terms"
+)
+print(perm_u_nested)
+
+# Seasonality within Location (permutations blocked within Location)
+pw_u_season_given_loc <- pairwise.adonis2(
+  distA_u ~ Seasonality,
+  data   = metaA,
+  strata = "Location",
+  p.adjust.m = "BH",
+  nperm = 999
+)
+
+# Impact within Location (Impact is nested in Location → test within Location)
+pw_u_impact_given_loc <- pairwise.adonis2(
+  distA_u ~ Impact,
+  data   = metaA,
+  strata = "Location",
+  p.adjust.m = "BH",
+  nperm = 999
+)
+
+
+# PLOT UNWEIGHTED
+
+library(phyloseq)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(ggnewscale)
+
+# Starting point 
+ps_src <- if (exists("phylo.rare")) phylo.rare else phylo
+psA <- subset_samples(ps_src, Species.name %in% c("Arbacia lixula", "A. lixula"))
+psA <- prune_samples(sample_sums(psA) > 0, psA)
+psA <- prune_taxa(taxa_sums(psA) > 0, psA)
+
+# (optional) transformation; not necessary for unweighted,but it mantains consistency within the flux
+psA.rel <- if (exists("psA.rel")) psA.rel else microbiome::transform(psA, "compositional")
+
+# Data frame Seasonality and Impact
+sdA <- data.frame(sample_data(psA.rel))
+if (!"Seasonality" %in% names(sdA) && "Seasonality..sampling.effort.order." %in% names(sdA)) {
+  sdA$Seasonality <- dplyr::recode(
+    as.character(sdA$Seasonality..sampling.effort.order.),
+    "First"="Spring","Second"="Autumn","Third"="Winter", .default = NA_character_
+  )
+}
+sdA$Seasonality <- factor(sdA$Seasonality, levels = c("Winter","Spring","Autumn"))
+if (!"Impact" %in% names(sdA) && "Anthropic.influence" %in% names(sdA)) {
+  sdA$Impact <- dplyr::recode(
+    as.character(sdA$Anthropic.influence),
+    "Non Contaminated" = "Lower-impact",
+    "Contaminated"     = "Higher-impact",
+    .default = NA_character_
+  )
+}
+sdA$Impact <- factor(sdA$Impact, levels = c("Lower-impact","Higher-impact"))
+sample_data(psA.rel)$Seasonality <- sdA$Seasonality
+sample_data(psA.rel)$Impact      <- sdA$Impact
+
+# Palette
+if (!exists("season_pal")) {
+  season_pal <- c(Winter = "#4C78A8", Spring = "#72B7B2", Autumn = "#F58518")
+}
+
+# PCoA Unweighted UniFrac
+ordA_u <- ordinate(psA.rel, method = "PCoA", distance = "unifrac")
+
+rel_u <- ordA_u$values$Relative_eig
+if (is.null(rel_u)) rel_u <- ordA_u$values$Eigenvalues / sum(ordA_u$values$Eigenvalues)
+ax1u <- round(100 * rel_u[1], 1)
+ax2u <- round(100 * rel_u[2], 1)
+
+# Dataframe for ggplot
+pdat <- plot_ordination(psA.rel, ordA_u, type = "samples")$data
+pdat$Seasonality <- factor(pdat$Seasonality, levels = c("Winter","Spring","Autumn"))
+pdat$Impact      <- factor(pdat$Impact, levels = c("Lower-impact","Higher-impact"))
+pdat_hi <- dplyr::filter(pdat, Impact == "Higher-impact")
+
+# Shapes by Location (fillable)
+loc_levels <- levels(sample_data(psA.rel)$Location)
+if (is.null(loc_levels)) loc_levels <- unique(pdat$Location)
+base_shapes <- c(21, 24, 22, 25, 23)
+shape_vals <- setNames(base_shapes[seq_len(min(length(base_shapes), length(loc_levels)))], loc_levels)
+
+# Plot Unweighted with dummy legend Impact
+p_pcoa_u <- ggplot(pdat, aes(Axis.1, Axis.2)) +
+  stat_ellipse(aes(color = Seasonality, group = Seasonality),
+               type = "norm", level = 0.95, linewidth = 0.8) +
+  geom_point(aes(color = Seasonality, shape = Location),
+             size = 3, stroke = 0.9, fill = NA, alpha = 0.95) +
+  geom_point(data = pdat_hi,
+             aes(color = Seasonality, fill = Seasonality, shape = Location),
+             size = 3, stroke = 0.9, alpha = 0.95) +
+  scale_color_manual(values = season_pal, breaks = c("Winter","Spring","Autumn"), name = "Season") +
+  scale_fill_manual(values = season_pal, guide = "none") +
+  scale_shape_manual(values = shape_vals, name = "Location") +
+  labs(
+    title = expression(italic("Arbacia lixula") ~ " — PCoA (Unweighted UniFrac)"),
+    x = paste0("PCoA1 (", ax1u, "%)"),
+    y = paste0("PCoA2 (", ax2u, "%)")
+  ) +
+  theme_classic(base_size = 12) +
+  theme(plot.title = element_text(face = "bold"))
+
+# Dummy legend Impact (empty vs filled)
+p_pcoa_u <- p_pcoa_u +
+  ggnewscale::new_scale_fill() +
+  geom_point(
+    data = pdat,
+    aes(fill = Impact),
+    shape = 21, color = "black",
+    size = 3, alpha = 0,    
+    inherit.aes = TRUE
+  ) +
+  scale_fill_manual(
+    values = c("Lower-impact" = "white", "Higher-impact" = "black"),
+    breaks = c("Lower-impact","Higher-impact"),
+    name   = "Impact"
+  ) +
+  guides(fill = guide_legend(override.aes = list(alpha = 1, shape = 21, size = 3, color = "black")))
+
+p_pcoa_u
+```
+
+```{r}
+library(phyloseq)
+library(vegan) 
+library(ggplot2) 
+library(dplyr) 
+library(tidyr)
+library(readr) 
+library(forcats)
+library(grid) 
+# for
+arrow()
+
+outdir.arb <- "Simper_results_arbacia"
+dir.create(outdir.arb, showWarnings = FALSE)
+
+# Agreggate by family (Avoid duplicates)
+
+
+otu <- as(otu_table(phylo.rare), "matrix") if (!taxa_are_rows(phylo.rare)) otu <- t(otu) 
+
+# Taxa a files
+
+tax <- as(tax_table(phylo.rare), "matrix") fam_vec <- tax[, "Family"] fam_vec[is.na(fam_vec) | fam_vec == ""] <- "Unassigned"
+
+# Counts per family
+
+otu_fam <- rowsum(otu, fam_vec, reorder = FALSE)
+
+# Phyloseq at family level
+
+ps_fam <- phyloseq( otu_table(otu_fam, taxa_are_rows = TRUE), sample_data(sample_data(phylo.rare)) ) tax_fam <- matrix(rownames(otu_fam), ncol = 1, dimnames = list(rownames(otu_fam), "Family")) tax_table(ps_fam) <- tax_table(tax_fam)
+
+Neteja bàsica
+
+ps_fam <- prune_taxa(taxa_sums(ps_fam) > 0, ps_fam) sample_data(ps_fam)$Season <- factor(sample_data(ps_fam)$Season, levels = c("Winter","Spring","Autumn"))
+
+=========================================================
+
+3) ARBACIA LIXULA — PCoA + envfit + Top15 per Season
+
+=========================================================
+
+Mostres d'Arbacia
+
+psA <- prune_samples(sample_data(ps_fam)$Species.name == "Arbacia lixula", ps_fam) psA <- prune_taxa(taxa_sums(psA) > 0, psA)
+
+Relatives
+
+psA_rel <- transform_sample_counts(psA, function(x) x / sum(x))
+
+Matriu (SAMPLES x FAMÍLIES)
+
+matA <- as(otu_table(psA_rel), "matrix") if (taxa_are_rows(psA_rel)) matA <- t(matA)
+
+PCoA + coords
+
+ordA <- vegan::capscale(matA ~ 1, distance = "bray") coordsA <- as.data.frame(vegan::scores(ordA, display = "sites"))[, 1:2, drop = FALSE] colnames(coordsA) <- c("Axis1", "Axis2") coordsA$Season   <- sample_data(psA_rel)$Season coordsA$Location <- sample_data(psA_rel)$Location
+
+ENVFIT famílies (filtra columnes amb variança zero)
+
+commA <- as.data.frame(matA) if (ncol(commA) > 0) { keepA <- apply(commA, 2, sd) > 0 if (any(keepA)) commA <- commA[, keepA, drop = FALSE] } vecA <- NULL if (ncol(commA) > 1) { vfitA <- vegan::envfit(ordA, commA, permutations = 999) tmp <- try(as.data.frame(vegan::scores(vfitA, display = "vectors")), silent = TRUE) if (!inherits(tmp, "try-error") && nrow(tmp) > 0) { colnames(tmp)[1:2] <- c("Axis1","Axis2") tmp$Family <- rownames(tmp)
+    tmp$p <- vfitA$vectors$pvals tmp$r2 <- vfitA$vectors$r
+    tmp <- tmp %>% arrange(p, desc(r2)) %>% filter(p < 0.05) %>% slice_head(n = 8)
+    if (nrow(tmp) > 0) {
+      # ===== Escalat manual de fletxes perquè càpiguen al rang del PCoA =====
+      xr <- diff(range(coordsA$Axis1, na.rm = TRUE)) yr <- diff(range(coordsA$Axis2, na.rm = TRUE))
+      maxvx <- max(abs(tmp$Axis1), na.rm = TRUE) maxvy <- max(abs(tmp$Axis2), na.rm = TRUE)
+      if (is.finite(maxvx) && maxvx > 0 && is.finite(maxvy) && maxvy > 0) {
+        multA <- 0.9 * min(xr / (2 * maxvx), yr / (2 * maxvy))
+      } else {
+        multA <- 1
+      }
+      tmp$Axis1s <- tmp$Axis1 * multA
+      tmp$Axis2s <- tmp$Axis2 * multA vecA <- tmp } } }
+
+Elipses per Season (només grups amb ≥3 mostres)
+
+ellA_ok <- coordsA %>% count(Season) %>% filter(n >= 3) %>% pull(Season)
+
+GRÀFIC PCoA amb fletxes i elipses
+
+gA <- ggplot(coordsA, aes(Axis1, Axis2)) + geom_point(aes(color = Season, shape = Location), size = 3, alpha = .85) + theme_bw(base_size = 12) + labs( title = bquote("PCoA Bray–Curtis — " * italic(Arbacia~lixula)), x = "PCoA1", y = "PCoA2" ) if (length(ellA_ok) > 0) { gA <- gA + stat_ellipse( data = coordsA %>% filter(Season %in% ellA_ok), aes(color = Season), type = "t", linewidth = 0.6 ) } if (!is.null(vecA) && nrow(vecA) > 0) { gA <- gA + geom_segment(data = vecA, aes(x = 0, y = 0, xend = Axis1s, yend = Axis2s), arrow = arrow(length = unit(0.22, "cm"))) + geom_text(data = vecA, aes(x = Axis1s, y = Axis2s, label = Family), vjust = -0.35, size = 3) } ggsave(file.path(outdir, "PCoA_envfit_Arbacia.png"), gA, width = 8, height = 6.5, dpi = 300)
+
+TOP-15 per SEASON (mitjana d’abundància relativa)
+
+sdatA <- as(sample_data(psA_rel), "data.frame") dfA <- as.data.frame(matA) dfA$Sample <- rownames(dfA) dfA <- dfA %>% mutate(Season = sdatA[Sample, "Season", drop = TRUE])
+
+longA <- dfA %>% pivot_longer(cols = -c(Sample, Season), names_to = "Family", values_to = "abund")
+
+meansA <- longA %>% group_by(Season, Family) %>% summarise(average = mean(abund, na.rm = TRUE), .groups = "drop")
+
+topA <- meansA %>% group_by(Season) %>% arrange(desc(average), .by_group = TRUE) %>% slice_head(n = 15) %>% ungroup()
+
+CSVs Arbacia
+
+write_csv(topA %>% arrange(Season, desc(average)), file.path(outdir, "SIMPER_Arbacia_top15_bySeason_families.csv")) for (sea in unique(na.omit(topA$Season))) { write_csv(filter(topA, Season == sea) %>% arrange(desc(average)), file.path(outdir, paste0("SIMPER_Arbacia_top15_", sea, "_families.csv"))) }
+
+GRÀFICS Top-15 Arbacia (un per season) — títol amb cursiva
+
+for (sea in unique(na.omit(topA$Season))) { dat <- filter(topA, Season == sea) %>% mutate(Family = fct_reorder(Family, average)) p <- ggplot(dat, aes(x = Family, y = average, fill = Family)) + geom_col() + coord_flip() + theme_bw(base_size = 12) + guides(fill = "none") + labs( title = bquote(italic(Arbacia~lixula) ~ " — Top 15 famílies (" * .(sea) * ")"), x = NULL, y = "Mitjana abundància relativa" ) ggsave(file.path(outdir, paste0("Top15_Arbacia_", sea, ".png")), p, width = 7, height = 6, dpi = 300) }
+
+=============================================================
+
+4) PARACENTROTUS LIVIDUS — PCoA + envfit + Top15 per Season
+
+=============================================================
+
+Mostres de Paracentrotus
+
+psP <- prune_samples(sample_data(ps_fam)$Species.name == "Paracentrotus lividus", ps_fam) psP <- prune_taxa(taxa_sums(psP) > 0, psP)
+
+Relatives
+
+psP_rel <- transform_sample_counts(psP, function(x) x / sum(x))
+
+Matriu (SAMPLES x FAMÍLIES)
+
+matP <- as(otu_table(psP_rel), "matrix") if (taxa_are_rows(psP_rel)) matP <- t(matP)
+
+PCoA + coords
+
+ordP <- vegan::capscale(matP ~ 1, distance = "bray") coordsP <- as.data.frame(vegan::scores(ordP, display = "sites"))[, 1:2, drop = FALSE] colnames(coordsP) <- c("Axis1", "Axis2") coordsP$Season   <- sample_data(psP_rel)$Season coordsP$Location <- sample_data(psP_rel)$Location
+
+ENVFIT famílies
+
+commP <- as.data.frame(matP) if (ncol(commP) > 0) { keepP <- apply(commP, 2, sd) > 0 if (any(keepP)) commP <- commP[, keepP, drop = FALSE] } vecP <- NULL if (ncol(commP) > 1) { vfitP <- vegan::envfit(ordP, commP, permutations = 999) tmpP <- try(as.data.frame(vegan::scores(vfitP, display = "vectors")), silent = TRUE) if (!inherits(tmpP, "try-error") && nrow(tmpP) > 0) { colnames(tmpP)[1:2] <- c("Axis1","Axis2") tmpP$Family <- rownames(tmpP)
+    tmpP$p <- vfitP$vectors$pvals tmpP$r2 <- vfitP$vectors$r
+    tmpP <- tmpP %>% arrange(p, desc(r2)) %>% filter(p < 0.05) %>% slice_head(n = 8)
+    if (nrow(tmpP) > 0) {
+      # ===== Escalat manual de fletxes =====
+      xr <- diff(range(coordsP$Axis1, na.rm = TRUE)) yr <- diff(range(coordsP$Axis2, na.rm = TRUE))
+      maxvx <- max(abs(tmpP$Axis1), na.rm = TRUE) maxvy <- max(abs(tmpP$Axis2), na.rm = TRUE)
+      if (is.finite(maxvx) && maxvx > 0 && is.finite(maxvy) && maxvy > 0) {
+        multP <- 0.9 * min(xr / (2 * maxvx), yr / (2 * maxvy))
+      } else {
+        multP <- 1
+      }
+      tmpP$Axis1s <- tmpP$Axis1 * multP
+      tmpP$Axis2s <- tmpP$Axis2 * multP vecP <- tmpP } } }
+
+Elipses per Season
+
+ellP_ok <- coordsP %>% count(Season) %>% filter(n >= 3) %>% pull(Season)
+
+GRÀFIC PCoA amb fletxes i elipses
+
+gP <- ggplot(coordsP, aes(Axis1, Axis2)) + geom_point(aes(color = Season, shape = Location), size = 3, alpha = .85) + theme_bw(base_size = 12) + labs( title = bquote("PCoA Bray–Curtis — " * italic(Paracentrotus~lividus)), x = "PCoA1", y = "PCoA2" ) if (length(ellP_ok) > 0) { gP <- gP + stat_ellipse( data = coordsP %>% filter(Season %in% ellP_ok), aes(color = Season), type = "t", linewidth = 0.6 ) } if (!is.null(vecP) && nrow(vecP) > 0) { gP <- gP + geom_segment(data = vecP, aes(x = 0, y = 0, xend = Axis1s, yend = Axis2s), arrow = arrow(length = unit(0.22, "cm"))) + geom_text(data = vecP, aes(x = Axis1s, y = Axis2s, label = Family), vjust = -0.35, size = 3) } ggsave(file.path(outdir, "PCoA_envfit_Paracentrotus.png"), gP, width = 8, height = 6.5, dpi = 300)
+
+TOP-15 per SEASON
+
+sdatP <- as(sample_data(psP_rel), "data.frame") dfP <- as.data.frame(matP) dfP$Sample <- rownames(dfP) dfP <- dfP %>% mutate(Season = sdatP[Sample, "Season", drop = TRUE])
+
+longP <- dfP %>% pivot_longer(cols = -c(Sample, Season), names_to = "Family", values_to = "abund")
+
+meansP <- longP %>% group_by(Season, Family) %>% summarise(average = mean(abund, na.rm = TRUE), .groups = "drop")
+
+topP <- meansP %>% group_by(Season) %>% arrange(desc(average), .by_group = TRUE) %>% slice_head(n = 15) %>% ungroup()
+
+CSVs Paracentrotus
+
+write_csv(topP %>% arrange(Season, desc(average)), file.path(outdir, "SIMPER_Paracentrotus_top15_bySeason_families.csv")) for (sea in unique(na.omit(topP$Season))) { write_csv(filter(topP, Season == sea) %>% arrange(desc(average)), file.path(outdir, paste0("SIMPER_Paracentrotus_top15_", sea, "_families.csv"))) }
+
+GRÀFICS Top-15 Paracentrotus (títol amb cursiva)
+
+for (sea in unique(na.omit(topP$Season))) { dat <- filter(topP, Season == sea) %>% mutate(Family = fct_reorder(Family, average)) p <- ggplot(dat, aes(x = Family, y = average, fill = Family)) + geom_col() + coord_flip() + theme_bw(base_size = 12) + guides(fill = "none") + labs( title = bquote(italic(Paracentrotus~lividus) ~ " — Top 15 famílies (" * .(sea) * ")"), x = NULL, y = "Mitjana abundància relativa" ) ggsave(file.path(outdir, paste0("Top15_Paracentrotus_", sea, ".png")), p, width = 7, height = 6, dpi = 300) }
+```
+
+### Alpha Diversity Modelling and Visualisation for *Paracentrotus lividus*
+
+This section recodes metadata factors and subsets the dataset to *Paracentrotus lividus* before fitting Type III linear models to test the effects of Seasonality, Location and nested Impact on alpha diversity metrics (observed richness, Shannon index and Faith’s PD). Pairwise comparisons are computed using *emmeans* to evaluate differences within locations and seasonal blocks. The results are visualised through faceted boxplots using a custom seasonal colour palette to highlight patterns across environmental and temporal gradients.
+
+```{r}
+Alpha.diversity <- Alpha.diversity %>%
+  mutate(
+    Impact = dplyr::recode(as.character(Impact),
+      "Contaminated"      = "Higher-impact",
+      "Non Contaminated"  = "Lower-Impact",
+      .default = as.character(Impact),
+      .missing = as.character(Impact)
+    ),
+    Seasonality = dplyr::recode(as.character(Seasonality),
+      "First"  = "Spring",
+      "Second" = "Autumn",
+      "Third"  = "Winter",
+      .default = as.character(Seasonality),
+      .missing = as.character(Seasonality)
+    )
+  ) %>%
+  mutate(
+    Impact      = factor(Impact,      levels = c("Lower-Impact","Higher-impact")),
+    Seasonality = factor(Seasonality, levels = c("Spring","Autumn","Winter"))
+  ) %>%
+  droplevels()
+# Sum contrasts for Type III
+options(contrasts = c("contr.sum","contr.poly"))
+
+
+# Subset Paracentrotus
+df_P <- Alpha.diversity %>%
+  filter(Species.name == "Paracentrotus lividus") %>%
+  droplevels()
+
+# NESTED MODEL Seasonality * Location/Impact
+
+# SHANNON
+m_P_sha <- lm(shannon ~ Seasonality * Location/Impact, data = df_P)
+Anova(m_P_sha, type = 3)
+
+# OBSERVED RICHNESS 
+m_P_obs <- lm(observed ~ Seasonality * Location/Impact, data = df_P)
+Anova(m_P_obs, type = 3)
+
+emm_P_imp_by_loc_seas_obs <- emmeans(m_P_obs, ~ Impact | Location:Seasonality)
+pairs(emm_P_imp_by_loc_seas_obs, adjust = "BH")
+
+# FAITH’S PHYLOGENETIC DIVERSITY (PD)
+m_P_pd <- lm(phylogenetic_diversity ~ Seasonality * Location/Impact, data = df_P)
+Anova(m_P_pd, type = 3)
+
+emm_pd_seas <- emmeans(m_P_pd, ~ Seasonality)
+pairs(emm_pd_seas, adjust = "BH")
+
+emm_P_imp_by_loc_seas_pd <- emmeans(m_P_pd, ~ Impact | Location:Seasonality)
+pairs(emm_P_imp_by_loc_seas_pd, adjust = "BH")
+
+library(ggpubr)
+library(dplyr)
+
+# Color palette
+season_pal <- c(
+  "Spring" = "#4DAF4A",  # verd fresc
+  "Autumn" = "#E69F00",  # taronja suau
+  "Winter" = "#0072B2"   # blau oceànic
+)
+
+# Prep data
+df_P2 <- df_P %>%
+  # Si df_P ja és només Paracentrotus, no cal filtrar; si no, descomenta:
+  # filter(grepl("Paracentrotus", Species.name, ignore.case = TRUE)) %>%
+  mutate(
+    Impact = ifelse(Impact %in% c("Lower-Impact","Lower-impact","Non Contaminated"),
+                    "Lower-impact", "Higher-impact"),
+    Impact = factor(Impact, levels = c("Lower-impact","Higher-impact")),
+    Seasonality = factor(Seasonality, levels = c("Spring","Autumn","Winter")),
+    Block = interaction(Location, Impact, sep = " — ", drop = TRUE)
+  ) %>%
+  droplevels()
+
+df_P2$Block <- forcats::fct_relevel(
+  df_P2$Block,
+  "Blanes — Lower-impact",
+  "Blanes — Higher-impact",
+  "Escala — Lower-impact",
+  "Escala — Higher-impact"
+)
+
+# Boxplot function
+make_box_P <- function(y_var, y_label, title_expr) {
+  ggboxplot(
+    df_P2,
+    x = "Seasonality", y = y_var,
+    color = "Seasonality",
+    palette = season_pal,
+    add = "jitter",
+    outlier.shape = NA,
+    facet.by = "Block",
+    nrow = 1
+  ) +
+    labs(x = NULL, y = y_label, title = title_expr) +
+    theme_bw(base_size = 12) +
+    theme(
+      strip.text = element_text(face = "bold"),
+      legend.title = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      panel.grid.minor = element_blank()
+    )
+}
+
+# Panels *P. lividus* 
+p_obs_P  <- make_box_P("observed", "Observed richness",
+                       expression(italic("P. lividus") ~ " — Observed richness across seasons by block"))
+p_shan_P <- make_box_P("shannon", "Shannon diversity (H')",
+                       expression(italic("P. lividus") ~ " — Shannon diversity across seasons by block"))
+p_pd_P   <- make_box_P("phylogenetic_diversity", "Faith's phylogenetic diversity",
+                       expression(italic("P. lividus") ~ " — Phylogenetic diversity across seasons by block"))
+
+# Final composition
+ggarrange(p_obs_P, p_shan_P, p_pd_P,
+          ncol = 1, nrow = 3,
+          common.legend = TRUE, legend = "right")
+```
+
+### Beta Diversity Analyses for *Paracentrotus lividus*: UniFrac-Based PCoA Ordinations
+
+This section characterises beta-diversity patterns in *Paracentrotus lividus* using PCoA ordinations computed from Weighted and Unweighted UniFrac distances. Seasonal, spatial and impact-driven structure is visualised through colour- and fill-coded ordination plots. Nested PERMANOVA models further evaluate the contributions of Seasonality, Location and anthropogenic Impact to overall community dissimilarity.
+
+### Alpha Diversity Modelling and Visualisation for *Water samples*
+
+This section recodes metadata factors and subsets the dataset to Water samples before fitting Type III linear models to test the effects of Seasonality, Location and nested Impact on alpha diversity metrics (observed richness, Shannon index and Faith’s PD). Pairwise comparisons are computed using *emmeans* to evaluate differences within locations and seasonal blocks. The results are visualised through faceted boxplots using a custom seasonal colour palette to highlight patterns across environmental and temporal gradients
+
+```{r}
+library(dplyr)
+library(emmeans)
+library(car)       
+
+# Sum contrasts for Type III
+options(contrasts = c("contr.sum","contr.poly"))
+
+
+## Subset Arbacia
+df_w <- Alpha.diversity %>%
+  filter(Species.name == "Water sample") %>%
+  droplevels()
+
+# Anova(type = 3)
+# NESTED MODEL Seasonality * Location/Impact
+
+# SHANNON 
+m_w_sha <- lm(shannon ~ Seasonality * Location/Impact, data = df_w)
+Anova(m_w_sha, type = 3)
+
+# Pairwise Seasonality inside each Location (respects interaction)
+emm_w_season_by_loc_sha <- emmeans(m_w_sha, ~ Seasonality | Location)
+pairs(emm_w_season_by_loc_sha, adjust = "tukey")
+
+# Pairwise Impact inside each Location and Seasonality (respects nesting + interaction)
+emm_w_imp_by_loc_seas_sha <- emmeans(m_w_sha, ~ Impact | Location:Seasonality)
+pairs(emm_w_imp_by_loc_seas_sha, adjust = "BH")  
+
+# OBSERVED RICHNESS 
+m_w_obs <- lm(observed ~ Seasonality * Location/Impact, data = df_w)
+Anova(m_w_obs, type = 3)
+
+# Pairwise Seasonality inside each Location (respects interaction)
+emm_w_season_by_loc_obs <- emmeans(m_w_obs, ~ Seasonality | Location)
+pairs(emm_w_season_by_loc_obs, adjust = "tukey")
+
+# Pairwise Impact inside each Location and Seasonality (respects nesting + interaction)
+emm_w_imp_by_loc_seas_obs <- emmeans(m_w_obs, ~ Impact | Location:Seasonality)
+pairs(emm_w_imp_by_loc_seas_obs, adjust = "BH")
+
+# FAITH’S PHYLOGENETIC DIVERSITY (PD) 
+m_w_pd <- lm(phylogenetic_diversity ~ Seasonality * Location/Impact, data = df_w)
+Anova(m_w_pd, type = 3)
+
+# Pairwise Seasonality inside each Location (respects interaction)
+emm_w_season_by_loc_pd <- emmeans(m_w_pd, ~ Seasonality | Location)
+pairs(emm_w_season_by_loc_pd, adjust = "tukey")
+
+# Pairwise Impact inside each Location and Seasonality (respects nesting + interaction)
+emm_w_imp_by_loc_seas_pd <- emmeans(m_w_pd, ~ Impact | Location:Seasonality)
+pairs(emm_w_imp_by_loc_seas_pd, adjust = "BH")
+
+# Color palette seasonality
+season_pal <- c(
+  "Spring" = "#4DAF4A",  
+  "Autumn" = "#E69F00",  
+  "Winter" = "#0072B2"   
+)
+
+# Filter only Water samples, prep data
+df_w <- df_w %>%
+  filter(Species.name == "Water sample") %>%
+  mutate(
+    Block = interaction(Location, Impact, sep = " — ", drop = TRUE),
+    Seasonality = factor(Seasonality, levels = c("Spring", "Autumn", "Winter")),
+    Impact      = factor(Impact, levels = c("Lower-Impact", "Higher-impact"))
+  )
+
+# Function to create Boxplots
+make_box <- function(yvar, ylab, title_expr) {
+  ggboxplot(
+    df_w,
+    x = "Seasonality",
+    y = yvar,
+    color = "Seasonality",
+    palette = season_pal,   
+    add = "jitter",
+    facet.by = "Block",
+    nrow = 1,
+    outlier.shape = NA
+  ) +
+    labs(x = NULL, y = ylab, title = title_expr) +
+    theme(
+      strip.text = element_text(face = "bold"),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank()
+    )
+}
+
+# Graphics
+p_obs  <- make_box("observed", "Observed richness",
+                   expression(italic("Water samples") ~ " — Observed richness across seasons by block"))
+p_shan <- make_box("shannon", "Shannon diversity (H')",
+                   expression(italic("Water samples") ~ " — Shannon diversity across seasons by block"))
+p_pd   <- make_box("phylogenetic_diversity", "Faith's phylogenetic diversity",
+                   expression(italic("Water samples") ~ " — Phylogenetic diversity across seasons by block"))
+
+# Final composition graphics
+ggarrange(p_obs, p_shan, p_pd, ncol = 1, nrow = 3, common.legend = TRUE, legend = "right")
+```
+
+### Beta Diversity Analyses for *Water samples* : UniFrac-Based PCoA Ordinations
+
+This section characterises beta-diversity patterns in Water samples using PCoA ordinations computed from Weighted and Unweighted UniFrac distances. Seasonal, spatial and impact-driven structure is visualised through colour- and fill-coded ordination plots. Nested PERMANOVA models further evaluate the contributions of Seasonality, Location and anthropogenic Impact to overall community dissimilarity.
+
+```{r}
+# Filter water samples 
+psw <- subset_samples(phylo.rare, Species.name %in% c("Water sample"))
+psw <- prune_samples(sample_names(psw), psw)  # clean
+
+# Relabel sample_data
+metaw<- data.frame(sample_data(psw)) %>%
+  mutate(
+    Impact = dplyr::recode(as.character(Anthropic.influence),
+                           "Non Contaminated" = "Lower-impact",
+                           "Contaminated"     = "Higher-impact",
+                           .default = NA_character_),
+    Impact = factor(Impact, levels = c("Lower-impact","Higher-impact")),
+
+    Seasonality = dplyr::recode(as.character(`Seasonality..sampling.effort.order.`),
+                                "First"  = "Spring",
+                                "Second" = "Autumn",
+                                "Third"  = "Winter",
+                                .default = NA_character_),
+    Seasonality = factor(Seasonality, levels = c("Spring","Autumn","Winter")),
+
+    Location = factor(Location)
+  )
+
+# Work with relative abundance 
+psw.rel <- microbiome::transform(psw, "compositional")
+
+# ORDINATIONS (PCoA)  
+# Weighted UniFrac
+ordw_w <- ordinate(psw.rel, method = "PCoA", distance = "wunifrac")
+
+# Unweighted UniFrac
+ordw_u <- ordinate(psw.rel, method = "PCoA", distance = "unifrac")
+
+# Barplots eigenvalues
+par(mfrow=c(1,2))
+barplot(ordw_w$values$Eigenvalues[1:10], main="Weighted UniFrac eig.")
+barplot(ordw_u$values$Eigenvalues[1:10], main="Unweighted UniFrac eig.")
+par(mfrow=c(1,1))
+
+# PLOTS 
+# Weighted: color = Seasonality, shape = Location
+pw_w <- plot_ordination(psw.rel, ordw_w, color = "Seasonality", shape = "Location") +
+  ggtitle("PCoA — Weighted UniFrac (Sea water)") +
+  geom_point(size = 3, alpha = 0.9) +
+  theme_classic()
+
+# Unweighted: color = Impact, shape = Location
+pw_u <- plot_ordination(psw.rel, ordw_u, color = "Impact", shape = "Location") +
+  ggtitle("PCoA — Unweighted UniFrac (Sea water)") +
+  geom_point(size = 3, alpha = 0.9) +
+  theme_classic()
+
+print(pw_w); print(pw_u)
+
+# DISTANCE MATRIX
+distw_w <- phyloseq::distance(psw.rel, method = "wunifrac")
+distw_u <- phyloseq::distance(psw.rel, method = "unifrac")
+
+
+# PERMANOVA (Nested) 
+set.seed(123)
+ctrl_loc <- how(nperm = 999, blocks = metaw$Location)  # constrain permutations within Location
+perm_w_nested_w <- adonis2(
+  distw_w ~ Seasonality *  Location/Impact,
+  data = metaw,
+  permutations = ctrl_loc,
+  by = "terms"
+)
+print(perm_w_nested_w)
+
+# Seasonality within Location (permutations blocked within Location)
+pw_w_season_given_loc_w <- pairwise.adonis2(
+  distw_w ~ Seasonality,
+  data   = metaw,
+  strata = "Location",
+  p.adjust.m = "BH",
+  nperm = 999
+)
+
+# Impact within Location (Impact is nested in Location → test within Location)
+pw_w_impact_given_loc_w <- pairwise.adonis2(
+  distw_w ~ Impact,
+  data   = metaw,
+  strata = "Location",
+  p.adjust.m = "BH",
+  nperm = 999
+)
+
+
+# Impact within Seasonality × Location
+
+library(pairwiseAdonis)
+
+# Subsets (Seasonality × Location)
+grp <- with(metaw, interaction(Seasonality, Location, drop = TRUE))
+
+pw_w_impact_given_season_loc_w <- lapply(levels(grp), function(g) {
+  idx <- which(grp == g)
+
+  # If< 2 Impact levels within subset, skim
+  if (length(unique(metaw$Impact[idx])) < 2L) {
+    return(sprintf("Omet: %s (menys de 2 nivells d'Impact)", g))
+  }
+
+  # Subdistance coherent with subset 
+  sub_dist <- as.dist(as.matrix(distw_w)[idx, idx])
+
+  # Subdata
+  sub_data_w <- metaw[idx, , drop = FALSE]
+
+  # Pairwise within Seasonality × Location
+  pairwise.adonis2(
+    sub_dist ~ Impact,
+    data       = sub_data_w,
+    p.adjust.m = "BH",
+    nperm      = 999
+  )
+})
+
+names(pw_w_impact_given_season_loc_w) <- levels(grp)
+
+pw_w_impact_given_season_loc_w
+
+
+#PLOT WEIGHTED
+
+library(phyloseq)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(ggnewscale)
+
+# Data
+ps_src <- if (exists("phylo.rare")) phylo.rare else phylo
+
+# Filter Paracentrotus
+psw <- subset_samples(ps_src, Species.name %in% c("Water sample"))
+psw <- prune_samples(sample_sums(psw) > 0, psw)
+psw <- prune_taxa(taxa_sums(psw) > 0, psw)
+
+# Build Data frame
+sdw <- data.frame(sample_data(psw))
+
+# Seasonality: if nededed... 'Seasonality..sampling.effort.order.' → Spring/Autumn/Winter
+if (!"Seasonality" %in% names(sdw) && "Seasonality..sampling.effort.order." %in% names(sdw)) {
+  sdw$Seasonality <- dplyr::recode(
+    as.character(sdw$Seasonality..sampling.effort.order.),
+    "First" = "Spring", "Second" = "Autumn", "Third" = "Winter",
+    .default = NA_character_
+  )
+}
+sdw$Seasonality <- factor(sdw$Seasonality, levels = c("Winter","Spring","Autumn"))
+
+# Impact: if needed... d'Anthropic.influence → Lower-impact / Higher-impact
+if (!"Impact" %in% names(sdw) && "Anthropic.influence" %in% names(sdw)) {
+  sdw$Impact <- dplyr::recode(
+    as.character(sdw$Anthropic.influence),
+    "Non Contaminated" = "Lower-impact",
+    "Contaminated"     = "Higher-impact",
+    .default = NA_character_
+  )
+}
+sdw$Impact <- factor(sdw$Impact, levels = c("Lower-impact","Higher-impact"))
+
+# Write object
+sample_data(psw)$Seasonality <- sdw$Seasonality
+sample_data(psw)$Impact      <- sdw$Impact
+
+# Season palette
+if (!exists("season_pal")) {
+  season_pal <- c(Winter = "#4C78A8", Spring = "#72B7B2", Autumn = "#F58518")
+}
+
+# Transform to relative (to visualize)
+psw.rel <- microbiome::transform(psw, "compositional")
+
+## 2) PCoA Weighted UniFrac
+ordw_w <- ordinate(psw.rel, method = "PCoA", distance = "wunifrac")
+
+# Percentatge by axis (explained)
+rel <- ordw_w$values$Relative_eig
+if (is.null(rel)) rel <- ordw_w$values$Eigenvalues / sum(ordw_w$values$Eigenvalues)
+ax1 <- round(100 * rel[1], 1)
+ax2 <- round(100 * rel[2], 1)
+
+# Data for ggplot and layers
+pdat <- plot_ordination(psw.rel, ordw_w, type = "samples")$data
+pdat$Seasonality <- factor(pdat$Seasonality, levels = c("Winter","Spring","Autumn"))
+pdat$Impact      <- factor(pdat$Impact, levels = c("Lower-impact","Higher-impact"))
+pdat_hi <- dplyr::filter(pdat, Impact == "Higher-impact")
+
+# Shapes by Location (21–25)
+loc_levels <- levels(sample_data(psw.rel)$Location)
+if (is.null(loc_levels)) loc_levels <- unique(pdat$Location)
+base_shapes <- c(21, 24, 22, 25, 23)  
+shape_vals <- setNames(base_shapes[seq_len(min(length(base_shapes), length(loc_levels)))], loc_levels)
+
+# Plot: color = Season, shape = Location, filled (same color) only Higher-impact + llegend dummy Impact
+p_pcoa_w <- ggplot(pdat, aes(Axis.1, Axis.2)) +
+  # Ellipses 95% per Season
+  stat_ellipse(aes(color = Seasonality, group = Seasonality),
+               type = "norm", level = 0.95, linewidth = 0.8) +
+  # Base layer: empty points (outline = Season), shape = Location
+  geom_point(aes(color = Seasonality, shape = Location),
+             size = 3, stroke = 0.9, fill = NA, alpha = 0.95) +
+  # Overlay: same shape/outline by filled same color for Higher-impact
+  geom_point(data = pdat_hi,
+             aes(color = Seasonality, fill = Seasonality, shape = Location),
+             size = 3, stroke = 0.9, alpha = 0.95) +
+  scale_color_manual(values = season_pal, breaks = c("Winter","Spring","Autumn"), name = "Season") +
+  scale_fill_manual(values = season_pal, guide = "none") +
+  scale_shape_manual(values = shape_vals, name = "Location") +
+  labs(
+    title = expression(italic("Sea water") ~ " — PCoA (Weighted UniFrac)"),
+    x = paste0("PCoA1 (", ax1, "%)"),
+    y = paste0("PCoA2 (", ax2, "%)")
+  ) +
+  theme_classic(base_size = 12) +
+  theme(plot.title = element_text(face = "bold"))
+
+# Legend Impact (empty vs filled) 
+p_pcoa_w <- p_pcoa_w +
+  ggnewscale::new_scale_fill() +
+  geom_point(
+    data = pdat,
+    aes(fill = Impact),    
+    shape = 21, color = "black",
+    size = 3, alpha = 0,   
+    inherit.aes = TRUE
+  ) +
+  scale_fill_manual(
+    values = c("Lower-impact" = "white", "Higher-impact" = "black"),
+    breaks = c("Lower-impact","Higher-impact"),
+    name   = "Impact"
+  ) +
+  guides(fill = guide_legend(override.aes = list(alpha = 1, shape = 21, size = 3, color = "black")))
+
+# Show plot
+p_pcoa_w
+
+
+
+##UNWEIGHTED
+
+set.seed(123)
+ctrl_loc <- how(nperm = 999, blocks = metaw$Location)  # constrain permutations within Location
+perm_u_nested_w <- adonis2(
+  distP_u  ~ Seasonality * Location/Impact,
+  data = metaw,
+  permutations = ctrl_loc,
+  by = "terms"
+)
+print(perm_u_nested_w)
+
+# Seasonality within Location (permutations blocked within Location)
+pw_u_season_given_loc_w <- pairwise.adonis2(
+  distw_u ~ Seasonality,
+  data   = metaw,
+  strata = "Location",
+  p.adjust.m = "BH",
+  nperm = 999
+)
+
+# Impact within Location (Impact is nested in Location → test within Location)
+pw_u_impact_given_loc_w <- pairwise.adonis2(
+  distw_u ~ Impact,
+  data   = metaw,
+  strata = "Location",
+  p.adjust.m = "BH",
+  nperm = 999
+)
+
+
+# PLOT UNWEIGHTED
+
+library(phyloseq)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(ggnewscale)
+
+# Starting point 
+ps_src <- if (exists("phylo.rare")) phylo.rare else phylo
+psw <- subset_samples(ps_src, Species.name %in% c("Water sample"))
+psw <- prune_samples(sample_sums(psw) > 0, psw)
+psw <- prune_taxa(taxa_sums(psw) > 0, psw)
+
+# (optional) transformation; not necessary for unweighted,but it mantains consistency within the flux
+psw.rel <- if (exists("psw.rel")) psw.rel else microbiome::transform(psw, "compositional")
+
+# Data frame Seasonality and Impact
+sdw <- data.frame(sample_data(psw.rel))
+if (!"Seasonality" %in% names(sdw) && "Seasonality..sampling.effort.order." %in% names(sdw)) {
+  sdw$Seasonality <- dplyr::recode(
+    as.character(sdw$Seasonality..sampling.effort.order.),
+    "First"="Spring","Second"="Autumn","Third"="Winter", .default = NA_character_
+  )
+}
+sdw$Seasonality <- factor(sdw$Seasonality, levels = c("Winter","Spring","Autumn"))
+if (!"Impact" %in% names(sdw) && "Anthropic.influence" %in% names(sdw)) {
+  sdw$Impact <- dplyr::recode(
+    as.character(sdw$Anthropic.influence),
+    "Non Contaminated" = "Lower-impact",
+    "Contaminated"     = "Higher-impact",
+    .default = NA_character_
+  )
+}
+sdw$Impact <- factor(sdw$Impact, levels = c("Lower-impact","Higher-impact"))
+sample_data(psw.rel)$Seasonality <- sdw$Seasonality
+sample_data(psw.rel)$Impact      <- sdw$Impact
+
+# Palette
+if (!exists("season_pal")) {
+  season_pal <- c(Winter = "#4C78A8", Spring = "#72B7B2", Autumn = "#F58518")
+}
+
+# PCoA Unweighted UniFrac
+ordw_u <- ordinate(psw.rel, method = "PCoA", distance = "unifrac")
+
+rel_u <- ordw_u$values$Relative_eig
+if (is.null(rel_u)) rel_u <- ordP_u$values$Eigenvalues / sum(ordP_u$values$Eigenvalues)
+ax1u <- round(100 * rel_u[1], 1)
+ax2u <- round(100 * rel_u[2], 1)
+
+# Dataframe for ggplot
+pdat <- plot_ordination(psw.rel, ordw_u, type = "samples")$data
+pdat$Seasonality <- factor(pdat$Seasonality, levels = c("Winter","Spring","Autumn"))
+pdat$Impact      <- factor(pdat$Impact, levels = c("Lower-impact","Higher-impact"))
+pdat_hi <- dplyr::filter(pdat, Impact == "Higher-impact")
+
+# Shapes by Location (fillable)
+loc_levels <- levels(sample_data(psP.rel)$Location)
+if (is.null(loc_levels)) loc_levels <- unique(pdat$Location)
+base_shapes <- c(21, 24, 22, 25, 23)
+shape_vals <- setNames(base_shapes[seq_len(min(length(base_shapes), length(loc_levels)))], loc_levels)
+
+# Plot Unweighted with dummy legend Impact
+p_pcoa_u <- ggplot(pdat, aes(Axis.1, Axis.2)) +
+  stat_ellipse(aes(color = Seasonality, group = Seasonality),
+               type = "norm", level = 0.95, linewidth = 0.8) +
+  geom_point(aes(color = Seasonality, shape = Location),
+             size = 3, stroke = 0.9, fill = NA, alpha = 0.95) +
+  geom_point(data = pdat_hi,
+             aes(color = Seasonality, fill = Seasonality, shape = Location),
+             size = 3, stroke = 0.9, alpha = 0.95) +
+  scale_color_manual(values = season_pal, breaks = c("Winter","Spring","Autumn"), name = "Season") +
+  scale_fill_manual(values = season_pal, guide = "none") +
+  scale_shape_manual(values = shape_vals, name = "Location") +
+  labs(
+    title = expression(italic("Sea water") ~ " — PCoA (Unweighted UniFrac)"),
+    x = paste0("PCoA1 (", ax1u, "%)"),
+    y = paste0("PCoA2 (", ax2u, "%)")
+  ) +
+  theme_classic(base_size = 12) +
+  theme(plot.title = element_text(face = "bold"))
+
+# Dummy legend Impact (empty vs filled)
+p_pcoa_u <- p_pcoa_u +
+  ggnewscale::new_scale_fill() +
+  geom_point(
+    data = pdat,
+    aes(fill = Impact),
+    shape = 21, color = "black",
+    size = 3, alpha = 0,    
+    inherit.aes = TRUE
+  ) +
+  scale_fill_manual(
+    values = c("Lower-impact" = "white", "Higher-impact" = "black"),
+    breaks = c("Lower-impact","Higher-impact"),
+    name   = "Impact"
+  ) +
+  guides(fill = guide_legend(override.aes = list(alpha = 1, shape = 21, size = 3, color = "black")))
+
+p_pcoa_u
+```
+
+### Family-level SIMPER analysis and seasonal pattern visualisation
+
+This section performs a comprehensive SIMPER analysis at the family level to identify the taxa driving seasonal differences in microbial communities associated with the two sea urchin species (*Arbacia lixula* and *Paracentrotus lividus*) and seawater.
+
+```{r}
+
+library(phyloseq)
+library(vegan)
+library(dplyr)
+library(tidyr)
+library(readr)
+library(stringr)
+
+# Create output directory 
+
+outdir<- "simper_results_family"
+dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
+
+# Subset by host (and water) and agglomerate at family level
+
+# Arbacia
+psA <- subset_samples(phylo.rare, Species.name == "Arbacia lixula")
+psA <- prune_taxa(taxa_sums(psA) > 0, psA)
+psA_fam <- tax_glom(psA, taxrank = "Family", NArm = FALSE)
+
+# Paracentrotus
+psP <- subset_samples (phylo.rare, Species.name == "Paracentrotus lividus")
+psP <- prune_taxa(taxa_sums(psP) > 0, psP)
+psP_fam <- tax_glom (psP, taxrank = "Family", NArm = FALSE)
+
+# Water samples
+psW <- subset_samples (phylo.rare, Species.name =="Water sample")
+psW <- prune_taxa(taxa_sums(psW) > 0, psW)
+psW_fam <- tax_glom(psW, taxrank = "Family", NArm = FALSE)
+
+
+# Community tables (samples x family) with collapsed families
+
+# Arbacia 
+commA <- as(otu_table(psA_fam), "matrix")
+if (taxa_are_rows(psA_fam)) commA <- t(commA)
+famA <- as(tax_table(psA_fam), "matrix")[, "Family"]
+famA <- ifelse(is.na(famA) | famA == "", "Unassigned", famA)
+colnames(commA) <- famA
+commA <- t(rowsum(t(commA), group = colnames(commA)))
+commA <- commA[, colSums(commA) > 0, drop = FALSE]
+
+# Paracentrotus
+commP <- as(otu_table(psP_fam), "matrix")
+if (taxa_are_rows(psP_fam)) commP <- t(commP)
+famP <- as(tax_table(psP_fam), "matrix")[, "Family"]
+famP <- ifelse(is.na(famP) | famP == "", "Unassigned", famP)
+colnames(commP) <- famP
+commP <- t(rowsum(t(commP), group = colnames(commP)))
+commP <- commP[, colSums(commP) > 0, drop = FALSE]
+
+# Water samples
+commW <- as(otu_table(psW_fam), "matrix")
+if (taxa_are_rows(psW_fam)) commW <- t(commW)
+famW <- as(tax_table(psW_fam), "matrix")[, "Family"]
+famW <- ifelse(is.na(famW) | famW == "", "Unassigned", famW)
+colnames(commW) <- famW
+commW <- t(rowsum(t(commW), group = colnames(commW)))
+commW <- commW[, colSums(commW) > 0, drop = FALSE]
+
+
+# Factors of season (major driver as alpha and beta diversity tests show)
+map_season <- c("First"="Spring","Second"="Autumn","Third"="Winter")
+
+grpA <- factor(map_season[ as.character(sample_data(psA_fam)[["Seasonality..sampling.effort.order."]]) ],
+               levels=c("Spring","Autumn","Winter"))
+grpP <- factor(map_season[ as.character(sample_data(psP_fam)[["Seasonality..sampling.effort.order."]]) ],
+               levels=c("Spring","Autumn","Winter"))
+grpW <- factor(map_season[ as.character(sample_data(psW_fam)[["Seasonality..sampling.effort.order."]]) ],
+               levels=c("Spring","Autumn","Winter"))
+
+
+
+# SIMPER at family level 
+set.seed(123)
+simA <- vegan::simper(commA, grpA, permutations = 999)
+simP <- vegan::simper(commP, grpP, permutations = 999)
+simW <- vegan::simper(commW, grpW, permutations = 999)
+
+sumA <- summary(simA)
+sumP <- summary(simP)
+sumW <- summary(simW)
+
+# Transform summary to data frames (ava, average and avb detection, even if it changes names)
+# Arbacia
+simperA_list <- list()
+for (comp in names(sumA)) {
+  tmp <- as.data.frame(sumA[[comp]])
+  tmp$Family <- rownames(tmp)
+  tmp$Comparison <- comp
+  parts <- strsplit(comp, "_")[[1]]
+  g1 <- parts[1]; g2 <- parts[2]
+  tmp$g1 <- g1; tmp$g2 <- g2
+
+  # Names to detect
+  lc <- tolower(colnames(tmp))
+
+  # Average
+  if (!("average" %in% lc)) {
+    avg_ix <- which(grepl("^average", lc))[1]
+    if (!is.na(avg_ix)) names(tmp)[avg_ix] <- "average"
+  }
+
+  # ava/avb
+  if (!("ava" %in% lc && "avb" %in% lc)) {
+    cand <- which(grepl("^av", lc) & !grepl("^average", lc))  # candidates 'av*' not 'average'
+    # match to group name
+    g1match <- cand[grepl(tolower(g1), lc[cand])]
+    g2match <- cand[grepl(tolower(g2), lc[cand])]
+    if (length(g1match)==1 && length(g2match)==1) {
+      tmp$ava <- suppressWarnings(as.numeric(tmp[[g1match]]))
+      tmp$avb <- suppressWarnings(as.numeric(tmp[[g2match]]))
+    } else if (length(cand) >= 2) {
+      # last option: first two
+      tmp$ava <- suppressWarnings(as.numeric(tmp[[cand[1]]]))
+      tmp$avb <- suppressWarnings(as.numeric(tmp[[cand[2]]]))
+    }
+  }
+
+  # Classic names (sd, ratio, cumsum, p often found)
+  if (!("sd" %in% tolower(names(tmp)))) {
+    sdx <- which(grepl("^sd$", tolower(names(tmp))))[1]
+    if (!is.na(sdx)) names(tmp)[sdx] <- "sd"
+  }
+  if (!("ratio" %in% tolower(names(tmp)))) {
+    rix <- which(grepl("^ratio", tolower(names(tmp))))[1]
+    if (!is.na(rix)) names(tmp)[rix] <- "ratio"
+  }
+  if (!("cumsum" %in% tolower(names(tmp)))) {
+    csx <- which(grepl("^cumsum", tolower(names(tmp))))[1]
+    if (!is.na(csx)) names(tmp)[csx] <- "cumsum"
+  }
+  if (!("p" %in% tolower(names(tmp)))) {
+    px <- which(tolower(names(tmp))=="p" | grepl("^prand|^pvalue", tolower(names(tmp))))[1]
+    if (!is.na(px)) names(tmp)[px] <- "p"
+  }
+
+  simperA_list[[comp]] <- tmp
+}
+simperA_df <- bind_rows(simperA_list)
+
+# "Winner season"
+simperA_df <- simperA_df %>%
+  mutate(Season = ifelse(!is.na(ava) & !is.na(avb),
+                         ifelse(ava >= avb, g1, g2), NA_character_))
+
+# Save contrasts
+write_csv(simperA_df, file.path(outdir, "SIMPER_family_Arbacia_all_contrasts.csv"))
+
+# Paracentrotus (same flux)
+simperP_list <- list()
+for (comp in names(sumP)) {
+  tmp <- as.data.frame(sumP[[comp]])
+  tmp$Family <- rownames(tmp)
+  tmp$Comparison <- comp
+  parts <- strsplit(comp, "_")[[1]]
+  g1 <- parts[1]; g2 <- parts[2]
+  tmp$g1 <- g1; tmp$g2 <- g2
+
+  lc <- tolower(colnames(tmp))
+
+  if (!("average" %in% lc)) {
+    avg_ix <- which(grepl("^average", lc))[1]
+    if (!is.na(avg_ix)) names(tmp)[avg_ix] <- "average"
+  }
+
+  if (!("ava" %in% lc && "avb" %in% lc)) {
+    cand <- which(grepl("^av", lc) & !grepl("^average", lc))
+    g1match <- cand[grepl(tolower(g1), lc[cand])]
+    g2match <- cand[grepl(tolower(g2), lc[cand])]
+    if (length(g1match)==1 && length(g2match)==1) {
+      tmp$ava <- suppressWarnings(as.numeric(tmp[[g1match]]))
+      tmp$avb <- suppressWarnings(as.numeric(tmp[[g2match]]))
+    } else if (length(cand) >= 2) {
+      tmp$ava <- suppressWarnings(as.numeric(tmp[[cand[1]]]))
+      tmp$avb <- suppressWarnings(as.numeric(tmp[[cand[2]]]))
+    }
+  }
+
+  if (!("sd" %in% tolower(names(tmp)))) {
+    sdx <- which(grepl("^sd$", tolower(names(tmp))))[1]
+    if (!is.na(sdx)) names(tmp)[sdx] <- "sd"
+  }
+  if (!("ratio" %in% tolower(names(tmp)))) {
+    rix <- which(grepl("^ratio", tolower(names(tmp))))[1]
+    if (!is.na(rix)) names(tmp)[rix] <- "ratio"
+  }
+  if (!("cumsum" %in% tolower(names(tmp)))) {
+    csx <- which(grepl("^cumsum", tolower(names(tmp))))[1]
+    if (!is.na(csx)) names(tmp)[csx] <- "cumsum"
+  }
+  if (!("p" %in% tolower(names(tmp)))) {
+    px <- which(tolower(names(tmp))=="p" | grepl("^prand|^pvalue", tolower(names(tmp))))[1]
+    if (!is.na(px)) names(tmp)[px] <- "p"
+  }
+
+  simperP_list[[comp]] <- tmp
+}
+simperP_df <- bind_rows(simperP_list)
+
+simperP_df <- simperP_df %>%
+  mutate(Season = ifelse(!is.na(ava) & !is.na(avb),
+                         ifelse(ava >= avb, g1, g2), NA_character_))
+
+write_csv(simperP_df, file.path(outdir, "SIMPER_family_Paracentrotus_all_contrasts.csv"))
+
+# Water samples (same flux)
+simperW_list <- list()
+for (comp in names(sumW)) {
+  tmp <- as.data.frame(sumW[[comp]])
+  tmp$Family <- rownames(tmp)
+  tmp$Comparison <- comp
+  parts <- strsplit(comp, "_")[[1]]
+  g1 <- parts[1]; g2 <- parts[2]
+  tmp$g1 <- g1; tmp$g2 <- g2
+
+  lc <- tolower(colnames(tmp))
+
+  if (!("average" %in% lc)) {
+    avg_ix <- which(grepl("^average", lc))[1]
+    if (!is.na(avg_ix)) names(tmp)[avg_ix] <- "average"
+  }
+
+  if (!("ava" %in% lc && "avb" %in% lc)) {
+    cand <- which(grepl("^av", lc) & !grepl("^average", lc))
+    g1match <- cand[grepl(tolower(g1), lc[cand])]
+    g2match <- cand[grepl(tolower(g2), lc[cand])]
+    if (length(g1match)==1 && length(g2match)==1) {
+      tmp$ava <- suppressWarnings(as.numeric(tmp[[g1match]]))
+      tmp$avb <- suppressWarnings(as.numeric(tmp[[g2match]]))
+    } else if (length(cand) >= 2) {
+      tmp$ava <- suppressWarnings(as.numeric(tmp[[cand[1]]]))
+      tmp$avb <- suppressWarnings(as.numeric(tmp[[cand[2]]]))
+    }
+  }
+
+  if (!("sd" %in% tolower(names(tmp)))) {
+    sdx <- which(grepl("^sd$", tolower(names(tmp))))[1]
+    if (!is.na(sdx)) names(tmp)[sdx] <- "sd"
+  }
+  if (!("ratio" %in% tolower(names(tmp)))) {
+    rix <- which(grepl("^ratio", tolower(names(tmp))))[1]
+    if (!is.na(rix)) names(tmp)[rix] <- "ratio"
+  }
+  if (!("cumsum" %in% tolower(names(tmp)))) {
+    csx <- which(grepl("^cumsum", tolower(names(tmp))))[1]
+    if (!is.na(csx)) names(tmp)[csx] <- "cumsum"
+  }
+  if (!("p" %in% tolower(names(tmp)))) {
+    px <- which(tolower(names(tmp))=="p" | grepl("^prand|^pvalue", tolower(names(tmp))))[1]
+    if (!is.na(px)) names(tmp)[px] <- "p"
+  }
+
+  simperW_list[[comp]] <- tmp
+}
+simperW_df <- bind_rows(simperW_list)
+
+simperW_df <- simperW_df %>%
+  mutate(Season = ifelse(!is.na(ava) & !is.na(avb),
+                         ifelse(ava >= avb, g1, g2), NA_character_))
+
+write_csv(simperW_df, file.path(outdir, "SIMPER_family_Watersamples_all_contrasts.csv"))
+
+# Summary by season
+simperA_season <- simperA_df %>%
+  filter(!is.na(Season)) %>%
+  group_by(Season, Family) %>%
+  summarise(average_sum = sum(average, na.rm = TRUE),
+            n_contrasts = dplyr::n_distinct(Comparison),
+            .groups = "drop") %>%
+  arrange(Season, desc(average_sum))
+write_csv(simperA_season, file.path(outdir, "SIMPER_family_Arbacia_bySeason.csv"))
+
+simperP_season <- simperP_df %>%
+  filter(!is.na(Season)) %>%
+  group_by(Season, Family) %>%
+  summarise(average_sum = sum(average, na.rm = TRUE),
+            n_contrasts = dplyr::n_distinct(Comparison),
+            .groups = "drop") %>%
+  arrange(Season, desc(average_sum))
+write_csv(simperP_season, file.path(outdir, "SIMPER_family_Paracentrotus_bySeason.csv"))
+
+simperW_season <- simperW_df %>%
+  filter(!is.na(Season)) %>%
+  group_by(Season, Family) %>%
+  summarise(average_sum = sum(average, na.rm = TRUE),
+            n_contrasts = dplyr::n_distinct(Comparison),
+            .groups = "drop") %>%
+  arrange(Season, desc(average_sum))
+write_csv(simperW_season, file.path(outdir, "SIMPER_family_Watersamples_bySeason.csv"))
+
+# TOP15 by season; useful for figures
+
+top15A <- simperA_season %>%
+  group_by(Season) %>%
+  slice_max(order_by = average_sum, n = 15, with_ties = FALSE) %>%
+  ungroup()
+write_csv(top15A, file.path(outdir, "Top15_family_bySeason_Arbacia.csv"))
+
+top15P <- simperP_season %>%
+  group_by(Season) %>%
+  slice_max(order_by = average_sum, n = 15, with_ties = FALSE) %>%
+  ungroup()
+write_csv(top15P, file.path(outdir, "Top15_family_bySeason_Paracentrotus.csv"))
+
+top15W <- simperW_season %>%
+  group_by(Season) %>%
+  slice_max(order_by = average_sum, n = 15, with_ties = FALSE) %>%
+  ungroup()
+write_csv(top15W, file.path(outdir, "Top15_family_bySeason_Watersamples.csv"))
+
+library(phyloseq)
+library(vegan)
+library(ape)
+library(tidyverse)
+library(ggplot2)
+library(scales)
+library(grid)
+
+# ENVFIT + PCOA
+
+# Arbacia
+sd <- data.frame(sample_data(phylo.rare))
+sd$Season <- dplyr::recode(sd$Seasonality..sampling.effort.order.,
+                           First = "Spring", Second = "Autumn", Third = "Winter")
+sd$Season <- factor(sd$Season, levels = c("Spring","Autumn","Winter"))
+sample_data(phylo.rare)$Season <- sd$Season
+psA <- subset_samples(phylo.rare, Species.name == "Arbacia lixula")
+psA <- prune_samples(sample_sums(psA) > 0, psA)
+psA <- prune_taxa(taxa_sums(psA) > 0, psA)
+
+psA_fam <- tax_glom(psA, taxrank = "Family", NArm = FALSE)
+famA <- as(tax_table(psA_fam)[,"Family"], "vector")
+famA[is.na(famA) | famA==""] <- "Unassigned"
+taxa_names(psA_fam) <- make.unique(famA)
+
+psA_rel <- transform_sample_counts(psA_fam, function(x) x / sum(x))
+
+# PCoA (Bray)
+distA  <- phyloseq::distance(psA_rel, method = "bray")
+pcoaA  <- ape::pcoa(distA)
+coordsA <- as.data.frame(pcoaA$vectors[,1:2]); colnames(coordsA) <- c("Axis1","Axis2")
+coordsA$SampleID <- rownames(coordsA)
+
+mdA <- data.frame(sample_data(psA_rel)) %>% rownames_to_column("SampleID")
+coordsA <- left_join(coordsA, mdA[,c("SampleID","Season")], by = "SampleID")
+
+# Community matrix
+matA <- as(otu_table(psA_rel), "matrix")
+if (taxa_are_rows(psA_rel)) matA <- t(matA)
+commA <- as.data.frame(matA)
+
+# Keep columns for envfit
+keepA <- apply(commA, 2, sd) > 0
+commA <- commA[, keepA, drop = FALSE]
+
+# envfit on coordinates (matrix to 2D)
+vfitA <- vegan::envfit(as.matrix(coordsA[,c("Axis1","Axis2")]), commA, permutations = 999)
+
+vecA <- as.data.frame(vegan::scores(vfitA, display = "vectors"))
+colnames(vecA)[1:2] <- c("Axis1","Axis2")
+vecA$Family <- rownames(vecA)
+vecA$p  <- vfitA$vectors$pvals
+vecA$r2 <- vfitA$vectors$r
+
+# Select vectors (p<0.05; if not, top r2)
+vecA <- vecA %>% arrange(p, desc(r2))
+if (sum(vecA$p < 0.05) > 0) {
+  vecA <- vecA %>% filter(p < 0.05) %>% slice_head(n = 12)
+} else {
+  vecA <- vecA %>% slice_head(n = 12)
+}
+
+# Scale arrows to fit 
+xr <- range(coordsA$Axis1, na.rm=TRUE); yr <- range(coordsA$Axis2, na.rm=TRUE)
+mx <- max(abs(vecA$Axis1), na.rm=TRUE); my <- max(abs(vecA$Axis2), na.rm=TRUE)
+sx <- ifelse(mx>0, 0.9*(diff(xr))/(2*mx), Inf)
+sy <- ifelse(my>0, 0.9*(diff(yr))/(2*my), Inf)
+multA <- min(sx, sy); if(!is.finite(multA)) multA <- 1
+vecA$Axis1s <- vecA$Axis1 * multA
+vecA$Axis2s <- vecA$Axis2 * multA
+
+# Percent var explained
+pcA1 <- round(pcoaA$values$Relative_eig[1]*100, 1)
+pcA2 <- round(pcoaA$values$Relative_eig[2]*100, 1)
+
+# Palette + graphic
+pal_season <- c(Spring="#1b9e77", Autumn="#d95f02", Winter="#377eb8")
+
+gA <- ggplot(coordsA, aes(Axis1, Axis2, color = Season)) +
+  geom_point(size = 2) +
+  stat_ellipse(aes(group = Season), level = 0.68, linewidth = 0.8, show.legend = FALSE) +
+  geom_segment(data = vecA,
+               aes(x = 0, y = 0, xend = Axis1s, yend = Axis2s),
+               inherit.aes = FALSE, arrow = arrow(length = unit(0.25,"cm"))) +
+  geom_text(data = vecA,
+            aes(x = Axis1s, y = Axis2s, label = Family),
+            inherit.aes = FALSE, nudge_x = 0.02*diff(xr), nudge_y = 0.02*diff(yr),
+            size = 3) +
+  scale_color_manual(values = pal_season) +
+  labs(title = "PCoA (Bray) — Arbacia lixula",
+       x = paste0("PCoA1 (", pcA1, "%)"),
+       y = paste0("PCoA2 (", pcA2, "%)")) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid = element_line(colour="grey90"))
+ggsave(file.path(outdir, "PCoA_envfit_Arbacia.png"), gA, width = 8, height = 6.5, dpi = 300)
+
+# Save significant envfit vectors
+write_csv(vecA %>% select(Family, Axis1, Axis2, r2, p),
+          file.path(outdir, "envfit_vectors_significant_Arbacia.csv"))
+
+
+# Paracentrotus
+psP <- subset_samples(phylo.rare, Species.name == "Paracentrotus lividus")
+psP <- prune_samples(sample_sums(psP) > 0, psP)
+psP <- prune_taxa(taxa_sums(psP) > 0, psP)
+
+psP_fam <- tax_glom(psP, taxrank = "Family", NArm = FALSE)
+famP <- as(tax_table(psP_fam)[,"Family"], "vector")
+famP[is.na(famP) | famP==""] <- "Unassigned"
+taxa_names(psP_fam) <- make.unique(famP)
+
+psP_rel <- transform_sample_counts(psP_fam, function(x) x / sum(x))
+
+distP  <- phyloseq::distance(psP_rel, method = "bray")
+pcoaP  <- ape::pcoa(distP)
+coordsP <- as.data.frame(pcoaP$vectors[,1:2]); colnames(coordsP) <- c("Axis1","Axis2")
+coordsP$SampleID <- rownames(coordsP)
+
+mdP <- data.frame(sample_data(psP_rel)) %>% rownames_to_column("SampleID")
+coordsP <- left_join(coordsP, mdP[,c("SampleID","Season")], by = "SampleID")
+
+matP <- as(otu_table(psP_rel), "matrix")
+if (taxa_are_rows(psP_rel)) matP <- t(matP)
+commP <- as.data.frame(matP)
+keepP <- apply(commP, 2, sd) > 0
+commP <- commP[, keepP, drop = FALSE]
+
+vfitP <- vegan::envfit(as.matrix(coordsP[,c("Axis1","Axis2")]), commP, permutations = 999)
+
+vecP <- as.data.frame(vegan::scores(vfitP, display = "vectors"))
+colnames(vecP)[1:2] <- c("Axis1","Axis2")
+vecP$Family <- rownames(vecP)
+vecP$p  <- vfitP$vectors$pvals
+vecP$r2 <- vfitP$vectors$r
+vecP <- vecP %>% arrange(p, desc(r2))
+if (sum(vecP$p < 0.05) > 0) {
+  vecP <- vecP %>% filter(p < 0.05) %>% slice_head(n = 12)
+} else {
+  vecP <- vecP %>% slice_head(n = 12)
+}
+
+xr <- range(coordsP$Axis1, na.rm=TRUE); yr <- range(coordsP$Axis2, na.rm=TRUE)
+mx <- max(abs(vecP$Axis1), na.rm=TRUE); my <- max(abs(vecP$Axis2), na.rm=TRUE)
+sx <- ifelse(mx>0, 0.9*(diff(xr))/(2*mx), Inf)
+sy <- ifelse(my>0, 0.9*(diff(yr))/(2*my), Inf)
+multP <- min(sx, sy); if(!is.finite(multP)) multP <- 1
+vecP$Axis1s <- vecP$Axis1 * multP
+vecP$Axis2s <- vecP$Axis2 * multP
+
+pcP1 <- round(pcoaP$values$Relative_eig[1]*100, 1)
+pcP2 <- round(pcoaP$values$Relative_eig[2]*100, 1)
+
+gP <- ggplot(coordsP, aes(Axis1, Axis2, color = Season)) +
+  geom_point(size = 2) +
+  stat_ellipse(aes(group = Season), level = 0.68, linewidth = 0.8, show.legend = FALSE) +
+  geom_segment(data = vecP,
+               aes(x = 0, y = 0, xend = Axis1s, yend = Axis2s),
+               inherit.aes = FALSE, arrow = arrow(length = unit(0.25,"cm"))) +
+  geom_text(data = vecP,
+            aes(x = Axis1s, y = Axis2s, label = Family),
+            inherit.aes = FALSE, nudge_x = 0.02*diff(xr), nudge_y = 0.02*diff(yr),
+            size = 3) +
+  scale_color_manual(values = pal_season) +
+  labs(title = "PCoA (Bray) — Paracentrotus lividus",
+       x = paste0("PCoA1 (", pcP1, "%)"),
+       y = paste0("PCoA2 (", pcP2, "%)")) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid = element_line(colour="grey90"))
+ggsave(file.path(outdir, "PCoA_envfit_Paracentrotus.png"), gP, width = 8, height = 6.5, dpi = 300)
+
+write_csv(vecP %>% select(Family, Axis1, Axis2, r2, p),
+          file.path(outdir, "envfit_vectors_significant_Paracentrotus.csv"))
+
+
+# Water samples
+psW <- subset_samples(phylo.rare, Species.name == "Water sample")
+psW <- prune_samples(sample_sums(psW) > 0, psW)
+psW <- prune_taxa(taxa_sums(psW) > 0, psW)
+
+psW_fam <- tax_glom(psW, taxrank = "Family", NArm = FALSE)
+famW <- as(tax_table(psW_fam)[,"Family"], "vector")
+famW[is.na(famW) | famW==""] <- "Unassigned"
+taxa_names(psW_fam) <- make.unique(famW)
+
+psW_rel <- transform_sample_counts(psW_fam, function(x) x / sum(x))
+
+distW  <- phyloseq::distance(psW_rel, method = "bray")
+pcoaW  <- ape::pcoa(distW)
+coordsW <- as.data.frame(pcoaW$vectors[,1:2]); colnames(coordsW) <- c("Axis1","Axis2")
+coordsW$SampleID <- rownames(coordsW)
+
+mdW <- data.frame(sample_data(psW_rel)) %>% rownames_to_column("SampleID")
+coordsW <- left_join(coordsW, mdW[,c("SampleID","Season")], by = "SampleID")
+
+matW <- as(otu_table(psW_rel), "matrix")
+if (taxa_are_rows(psW_rel)) matW <- t(matW)
+commW <- as.data.frame(matW)
+keepW <- apply(commW, 2, sd) > 0
+commW <- commW[, keepW, drop = FALSE]
+
+vfitW <- vegan::envfit(as.matrix(coordsW[,c("Axis1","Axis2")]), commW, permutations = 999)
+
+vecW <- as.data.frame(vegan::scores(vfitW, display = "vectors"))
+colnames(vecW)[1:2] <- c("Axis1","Axis2")
+vecW$Family <- rownames(vecW)
+vecW$p  <- vfitW$vectors$pvals
+vecW$r2 <- vfitW$vectors$r
+vecW <- vecW %>% arrange(p, desc(r2))
+if (sum(vecW$p < 0.05) > 0) {
+  vecW <- vecW %>% filter(p < 0.05) %>% slice_head(n = 12)
+} else {
+  vecW <- vecW %>% slice_head(n = 12)
+}
+
+xr <- range(coordsW$Axis1, na.rm=TRUE); yr <- range(coordsW$Axis2, na.rm=TRUE)
+mx <- max(abs(vecW$Axis1), na.rm=TRUE); my <- max(abs(vecW$Axis2), na.rm=TRUE)
+sx <- ifelse(mx>0, 0.9*(diff(xr))/(2*mx), Inf)
+sy <- ifelse(my>0, 0.9*(diff(yr))/(2*my), Inf)
+multW <- min(sx, sy); if(!is.finite(multW)) multW <- 1
+vecW$Axis1s <- vecW$Axis1 * multW
+vecW$Axis2s <- vecW$Axis2 * multW
+
+pcP1 <- round(pcoaW$values$Relative_eig[1]*100, 1)
+pcP2 <- round(pcoaW$values$Relative_eig[2]*100, 1)
+
+gW <- ggplot(coordsW, aes(Axis1, Axis2, color = Season)) +
+  geom_point(size = 2) +
+  stat_ellipse(aes(group = Season), level = 0.68, linewidth = 0.8, show.legend = FALSE) +
+  geom_segment(data = vecP,
+               aes(x = 0, y = 0, xend = Axis1s, yend = Axis2s),
+               inherit.aes = FALSE, arrow = arrow(length = unit(0.25,"cm"))) +
+  geom_text(data = vecW,
+            aes(x = Axis1s, y = Axis2s, label = Family),
+            inherit.aes = FALSE, nudge_x = 0.02*diff(xr), nudge_y = 0.02*diff(yr),
+            size = 3) +
+  scale_color_manual(values = pal_season) +
+  labs(title = "PCoA (Bray) — Sea Water",
+       x = paste0("PCoA1 (", pcP1, "%)"),
+       y = paste0("PCoA2 (", pcP2, "%)")) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid = element_line(colour="grey90"))
+ggsave(file.path(outdir, "PCoA_envfit_Watersamples.png"), gW, width = 8, height = 6.5, dpi = 300)
+
+write_csv(vecW %>% select(Family, Axis1, Axis2, r2, p),
+          file.path(outdir, "envfit_vectors_significant_Watersamples.csv"))
+
+
+# CUMULATIVE CONTRIBUTION
+
+# Arbacia
+simA <- vegan::simper(commA, group = coordsA$Season, permutations = 999)
+sumA <- summary(simA)
+
+dfA <- list()
+for (comp in names(sumA)) {
+  tmp <- as.data.frame(sumA[[comp]])
+  tmp$Family <- rownames(tmp)
+  parts <- strsplit(comp, "_")[[1]]
+  tmp$Comparison <- comp
+  tmp$g1 <- parts[1]; tmp$g2 <- parts[2]
+  tmp$Season <- ifelse(tmp$ava > tmp$avb, tmp$g1, tmp$g2)
+  dfA[[comp]] <- tmp
+}
+simperA_df <- bind_rows(dfA)
+
+# Save + significant
+dir.create(file.path(outdir,"simper_Arbacia"), showWarnings = FALSE)
+write_csv(simperA_df,
+          file.path(outdir,"simper_Arbacia","SIMPER_family_all_byComparison.csv"))
+write_csv(simperA_df %>% filter(p <= 0.05),
+          file.path(outdir,"simper_Arbacia","SIMPER_family_significant_p0.05.csv"))
+
+# Agreggate by season (heatmap), average sum of "winner family"
+avg_by_season_A <- simperA_df %>%
+  filter(!is.na(Season)) %>%
+  group_by(Season, Family) %>%
+  summarise(average_sum = sum(average, na.rm = TRUE), .groups = "drop")
+write_csv(avg_by_season_A,
+          file.path(outdir,"simper_Arbacia","SIMPER_family_bySeason_sumAverage.csv"))
+
+cumA <- simperA_df %>%
+  group_by(Comparison) %>%
+  arrange(Comparison, desc(average)) %>%
+  mutate(rank = row_number(),
+         cum = cumsum(average)) %>%
+  ungroup()
+
+g_cumA <- ggplot(cumA, aes(rank, cum, group = Comparison)) +
+  geom_line(linewidth = 0.9) +
+  facet_wrap(~Comparison, scales = "free_y") +
+  labs(title = "Cumulative contribution — Arbacia lixula (SIMPER)",
+       x = "Ranked families", y = "Cumulative average dissimilarity") +
+  theme_minimal(base_size = 12)
+ggsave(file.path(outdir, "SIMPER_cumulative_Arbacia.png"), g_cumA, width = 8, height = 5, dpi = 300)
+
+# Paracentrotus
+simP <- vegan::simper(commP, group = coordsP$Season, permutations = 999)
+sumP <- summary(simP)
+
+dfP <- list()
+for (comp in names(sumP)) {
+  tmp <- as.data.frame(sumP[[comp]])
+  tmp$Family <- rownames(tmp)
+  parts <- strsplit(comp, "_")[[1]]
+  tmp$Comparison <- comp
+  tmp$g1 <- parts[1]; tmp$g2 <- parts[2]
+  tmp$Season <- ifelse(tmp$ava > tmp$avb, tmp$g1, tmp$g2)
+  dfP[[comp]] <- tmp
+}
+simperP_df <- bind_rows(dfP)
+
+dir.create(file.path(outdir,"simper_Paracentrotus"), showWarnings = FALSE)
+write_csv(simperP_df,
+          file.path(outdir,"simper_Paracentrotus","SIMPER_family_all_byComparison.csv"))
+write_csv(simperP_df %>% filter(p <= 0.05),
+          file.path(outdir,"simper_Paracentrotus","SIMPER_family_significant_p0.05.csv"))
+
+avg_by_season_P <- simperP_df %>%
+  filter(!is.na(Season)) %>%
+  group_by(Season, Family) %>%
+  summarise(average_sum = sum(average, na.rm = TRUE), .groups = "drop")
+write_csv(avg_by_season_P,
+          file.path(outdir,"simper_Paracentrotus","SIMPER_family_bySeason_sumAverage.csv"))
+
+cumP <- simperP_df %>%
+  group_by(Comparison) %>%
+  arrange(Comparison, desc(average)) %>%
+  mutate(rank = row_number(),
+         cum = cumsum(average)) %>%
+  ungroup()
+
+g_cumP <- ggplot(cumP, aes(rank, cum, group = Comparison)) +
+  geom_line(linewidth = 0.9) +
+  facet_wrap(~Comparison, scales = "free_y") +
+  labs(title = "Cumulative contribution — Paracentrotus lividus (SIMPER)",
+       x = "Ranked families", y = "Cumulative average dissimilarity") +
+  theme_minimal(base_size = 12)
+ggsave(file.path(outdir, "SIMPER_cumulative_Paracentrotus.png"), g_cumP, width = 8, height = 5, dpi = 300)
+
+# Water samples
+simW <- vegan::simper(commW, group = coordsW$Season, permutations = 999)
+sumW <- summary(simW)
+
+dfW <- list()
+for (comp in names(sumW)) {
+  tmp <- as.data.frame(sumW[[comp]])
+  tmp$Family <- rownames(tmp)
+  parts <- strsplit(comp, "_")[[1]]
+  tmp$Comparison <- comp
+  tmp$g1 <- parts[1]; tmp$g2 <- parts[2]
+  tmp$Season <- ifelse(tmp$ava > tmp$avb, tmp$g1, tmp$g2)
+  dfW[[comp]] <- tmp
+}
+simperW_df <- bind_rows(dfW)
+
+dir.create(file.path(outdir,"simper_Seawater"), showWarnings = FALSE)
+write_csv(simperW_df,
+          file.path(outdir,"simper_Seawater","SIMPER_family_all_byComparison.csv"))
+write_csv(simperW_df %>% filter(p <= 0.05),
+          file.path(outdir,"simper_Seawater","SIMPER_family_significant_p0.05.csv"))
+
+avg_by_season_W <- simperW_df %>%
+  filter(!is.na(Season)) %>%
+  group_by(Season, Family) %>%
+  summarise(average_sum = sum(average, na.rm = TRUE), .groups = "drop")
+write_csv(avg_by_season_W,
+          file.path(outdir,"simper_Seawater","SIMPER_family_bySeason_sumAverage.csv"))
+
+cumW <- simperW_df %>%
+  group_by(Comparison) %>%
+  arrange(Comparison, desc(average)) %>%
+  mutate(rank = row_number(),
+         cum = cumsum(average)) %>%
+  ungroup()
+
+g_cumW <- ggplot(cumW, aes(rank, cum, group = Comparison)) +
+  geom_line(linewidth = 0.9) +
+  facet_wrap(~Comparison, scales = "free_y") +
+  labs(title = "Cumulative contribution — Sea Water(SIMPER)",
+       x = "Ranked families", y = "Cumulative average dissimilarity") +
+  theme_minimal(base_size = 12)
+ggsave(file.path(outdir, "SIMPER_cumulative_Seawater.png"), g_cumW, width = 8, height = 5, dpi = 300)
+
+# HEATMAPS (TOP15)
+
+pal_Arbacia <- c("white", "#FEE6CE", "#FDAE6B", "#E6550D")
+pal_Paracentrotus <- c("white", "#E5F5E0", "#74C476", "#238B45")
+pal_Seawater <- c("white", "#DEEBF7", "#9ECAE1", "#3182BD")
+
+# Arbacia
+library(ggplot2)
+library(dplyr)
+library(forcats)
+
+hmA <- top15A %>%
+  mutate(Season = factor(Season, levels = c("Winter","Autumn","Spring"))) %>%
+  complete(Family, Season, fill = list(average_sum = 0)) %>%
+  group_by(Family) %>%
+  mutate(total = sum(average_sum, na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(Family = fct_reorder(Family, total, .desc = TRUE))
+
+gA <- ggplot(hmA, aes(Family, Season, fill = average_sum)) +
+  geom_tile(color = "white", linewidth = 0.6) +
+  scale_fill_gradientn(
+    colours = pal_Arbacia,
+    trans = "sqrt",                     
+    name = "SIMPER average",
+    labels = label_number(accuracy = 0.01)
+  ) +
+  labs(x = NULL, y = NULL) +
+  theme_classic(base_size = 11) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+    axis.text.y = element_text(size = 10),
+    axis.line   = element_blank(),
+    axis.ticks  = element_blank(),
+    legend.title = element_text(size = 10),
+    legend.text  = element_text(size = 9),
+    plot.background  = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    legend.key       = element_rect(fill = "white", color = NA)
+  )
+
+ggsave(
+  file.path(outdir, "SIMPER_Top15_heatmap_Arbacia_sand.png"),
+  gA, width = 11, height = 3.6, dpi = 600, bg = "white"
+)
+# Paracentrotus
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(forcats)
+library(scales)
+
+hmP <- top15P %>%
+  mutate(Season = factor(Season, levels = c("Winter","Autumn","Spring"))) %>%
+  complete(Family, Season, fill = list(average_sum = 0)) %>%
+  group_by(Family) %>%
+  mutate(total = sum(average_sum, na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(Family = fct_reorder(Family, total, .desc = TRUE))
+
+gP <- ggplot(hmP, aes(Family, Season, fill = average_sum)) +
+  geom_tile(color = "white", linewidth = 0.6) +
+  scale_fill_gradientn(
+    colours = pal_Paracentrotus,
+    trans = "sqrt",
+    name = "SIMPER average",
+    labels = label_number(accuracy = 0.01)
+  ) +
+  labs(x = NULL, y = NULL) +
+  theme_classic(base_size = 11) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+    axis.text.y = element_text(size = 10),
+    axis.line   = element_blank(),
+    axis.ticks  = element_blank(),
+    legend.title = element_text(size = 10),
+    legend.text  = element_text(size = 9),
+    plot.background  = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    legend.key       = element_rect(fill = "white", color = NA)
+  )
+
+ggsave(
+  file.path(outdir, "SIMPER_Top15_heatmap_Paracentrotus_green.png"),
+  gP, width = 11, height = 3.6, dpi = 600, bg = "white"
+)
+
+# Water samples
+hmW <- top15W %>%
+  mutate(Season = factor(Season, levels = c("Winter","Autumn","Spring"))) %>%
+  complete(Family, Season, fill = list(average_sum = 0)) %>%
+  group_by(Family) %>%
+  mutate(total = sum(average_sum, na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(Family = fct_reorder(Family, total, .desc = TRUE))
+
+gW <- ggplot(hmW, aes(Family, Season, fill = average_sum)) +
+  geom_tile(color = "white", linewidth = 0.6) +
+  scale_fill_gradientn(
+    colours = pal_Seawater,
+    trans = "sqrt",
+    name = "SIMPER average",
+    labels = label_number(accuracy = 0.01)
+  ) +
+  labs(x = NULL, y = NULL) +
+  theme_classic(base_size = 11) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+    axis.text.y = element_text(size = 10),
+    axis.line   = element_blank(),
+    axis.ticks  = element_blank(),
+    legend.title = element_text(size = 10),
+    legend.text  = element_text(size = 9),
+    plot.background  = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    legend.key       = element_rect(fill = "white", color = NA)
+  )
+
+ggsave(
+  file.path(outdir, "SIMPER_Top15_heatmap_Seawater_blue.png"),
+  gW, width = 11, height = 3.6, dpi = 600, bg = "white"
+)
+```
+
+### FAPROTAX Data Preparation and Cleaning
+
+This section loads required packages, cleans and recodes metadata (including season assignment), and imports the FAPROTAX functional table. It then ensures a functions × samples format and exports cleaned files for downstream functional analyses.
+
+```{r}
+# Load packages and useful functions
+library("tidyverse")
+library("phyloseq")
+library("rstatix")
+library("vegan")
+library("picante")
+library("kableExtra")
+library("reticulate")
+library("data.table")
+library("dplyr")
+library("tidyverse")
+library("data.table")
+library("scales")
+library("patchwork")
+
+setwd("~/Desktop/Paper Urchin's microbiota")
+
+# Paths and output folders
+meta_path <- "metadata_final.tsv"
+fapro_path <- "FAPROTAX_1.2.12/functional_otu_table.tsv"  
+outdir <- "FAPROTAX_results"
+dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
+
+# Metada + recode (easier to work with)
+metadata <- readr::read_tsv(meta_path, show_col_types = FALSE) %>%
+  rename(
+    sample.id   = `#SampleID`,
+    Species     = `Species name`,
+    Location    = `Location`,
+    Pressure    = `Anthropic influence`,
+    SeasonMonth = `Seasonality (month)`,
+    SeasonOrder = `Seasonality (sampling effort order)`
+  ) %>%
+  mutate(
+    sample.id = as.character(sample.id),
+    Species   = as.character(Species),
+    Location  = as.character(Location),
+    Pressure  = as.character(Pressure),
+    SeasonOrder = as.character(SeasonOrder)
+  )
+
+map_season <- c("First"="Spring","Second"="Autumn","Third"="Winter")
+metadata <- metadata %>%
+  mutate(
+    Season = map_season[SeasonOrder],
+    Season = factor(Season, levels = c("Spring","Autumn","Winter"))
+  )
+
+write_csv(metadata, file.path(outdir, "metadata_clean.csv"))
+
+# Import FAPROTAX
+faprotax_raw <- fread(
+  fapro_path,
+  sep = "\t",
+  header = TRUE,
+  fill = TRUE,
+  data.table = FALSE,
+  check.names = FALSE
+)
+
+id_col <- colnames(faprotax_raw)[1]
+rownames(faprotax_raw) <- faprotax_raw[[id_col]]
+faprotax_raw[[id_col]] <- NULL
+
+faprotax_raw[] <- lapply(faprotax_raw, function(x) suppressWarnings(as.numeric(as.character(x))))
+faprotax_raw[is.na(faprotax_raw)] <- 0
+
+# Ensure functions x samples (columns are sample IDs)
+if (!all(metadata$sample.id %in% colnames(faprotax_raw))) {
+  faprotax_raw <- as.data.frame(t(faprotax_raw))
+}
+
+write_csv(
+  tibble::rownames_to_column(as.data.frame(faprotax_raw), "faprotax.function"),
+  file.path(outdir, "faprotax_functions_x_samples_raw.csv")
+)
+
+
+# Ensure FAPROTAX is functions x samples (samples as columns)
+
+metadata$sample.id <- as.character(metadata$sample.id)
+
+# If sample IDs are in rownames instead of colnames, transpose
+if (!any(metadata$sample.id %in% colnames(faprotax_raw)) &&
+    any(metadata$sample.id %in% rownames(faprotax_raw))) {
+  message("[Fix] FAPROTAX had samples as rows -> transposing table.")
+  faprotax_raw <- as.data.frame(t(faprotax_raw))
+}
+
+# If still no overlap, stop early with a clear message
+overlap <- intersect(metadata$sample.id, colnames(faprotax_raw))
+if (length(overlap) == 0) {
+  stop("No sample IDs from metadata match FAPROTAX column names. Check sample.id formatting.")
+} else {
+  message("[OK] Matching sample IDs found: ", length(overlap))
+}
+
+```
+
+### FAPROTAX Arbacia
+
+This analysis characterizes seasonal variation in predicted microbial functions (FAPROTAX) within the coelomic fluid of *Arbacia lixula*. Relative abundances were averaged per season, and significant differences were assessed using Kruskal–Wallis tests with BH correction. The resulting bar plot displays the top 30 functions, showing mean ± SE across seasons and highlighting seasonally structured functional shifts.
+
+```{r}
+# Subset + Relative + Long
+
+ds <- "Arbacia lixula"
+
+arb_samples <- metadata %>%
+  filter(Species == ds) %>%
+  pull(sample.id) %>%
+  unique()
+
+arb_samples <- arb_samples[arb_samples %in% colnames(faprotax_raw)]
+
+f_arb <- faprotax_raw[, arb_samples, drop = FALSE]
+
+# Relative abundance per sample
+f_arb_rel <- sweep(f_arb, 2, colSums(f_arb), "/")
+f_arb_rel[is.na(f_arb_rel)] <- 0
+f_arb_rel <- f_arb_rel[rowSums(f_arb_rel) > 0, ]
+
+arb_long <- f_arb_rel %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("faprotax.function") %>%
+  pivot_longer(
+    -faprotax.function,
+    names_to = "sample.id",
+    values_to = "abundance"
+  ) %>%
+  left_join(metadata, by = "sample.id") %>%
+  filter(!is.na(Season))
+
+
+# SEASONALITY
+
+# Mean and SE
+arb_sum <- arb_long %>%
+  group_by(faprotax.function, Season) %>%
+  summarise(
+    mean = mean(abundance),
+    se   = sd(abundance) / sqrt(n()),
+    .groups = "drop"
+  ) %>%
+  group_by(faprotax.function) %>%
+  filter(max(mean) > 1e-4) %>%   
+  ungroup()
+
+# Order 
+
+fun_order <- arb_sum %>%
+  group_by(faprotax.function) %>%
+  summarise(total = sum(mean), .groups = "drop") %>%
+  arrange(desc(total)) %>%
+  pull(faprotax.function)
+
+arb_sum <- arb_sum %>%
+  mutate(
+    faprotax.function = factor(faprotax.function, levels = fun_order),
+    Season = factor(Season, levels = c("Spring","Autumn","Winter"))
+  )
+
+# Kruskal and significant functions (marked with stars)
+
+arb_kw <- arb_long %>%
+  group_by(faprotax.function) %>%
+  summarise(
+    p = tryCatch(
+      kruskal.test(abundance ~ Season)$p.value,
+      error = function(e) NA_real_
+    ),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    p_adj = p.adjust(p, method = "BH"),
+    stars = case_when(
+      p_adj <= 0.001 ~ "***",
+      p_adj <= 0.01  ~ "**",
+      p_adj <= 0.05  ~ "*",
+      TRUE           ~ ""
+    )
+  )
+
+arb_sum2 <- arb_sum %>%
+  left_join(arb_kw, by = "faprotax.function")
+
+# BARPLOT
+
+library(scales)
+
+eps <- 1e-6  # small value for pseudo-log 
+
+arb_sum2_plot <- arb_sum2 %>%
+  mutate(
+    ymin = pmax(mean - se, 0),
+    ymax = pmax(mean + se, 0)
+  )
+
+#  Top 30 by abudance
+topN <- 30
+top_fun <- arb_sum2_plot %>%
+  group_by(faprotax.function) %>%
+  summarise(total = sum(mean), .groups="drop") %>%
+  arrange(desc(total)) %>%
+  slice_head(n = topN) %>%
+  pull(faprotax.function)
+<
+arb_sum2_plot <- arb_sum2_plot %>%
+  filter(faprotax.function %in% top_fun) %>%
+  mutate(faprotax.function = factor(faprotax.function, levels = top_fun))
+
+star_pos <- arb_sum2_plot %>%
+  group_by(faprotax.function) %>%
+  summarise(
+    x = max(ymax) * 1.25,
+    stars = first(stars),
+    .groups="drop"
+  ) %>%
+  filter(stars != "")
+
+p_arb_season <- ggplot(
+  arb_sum2_plot,
+  aes(x = faprotax.function, y = mean, fill = Season)
+) +
+  geom_col(
+    position = position_dodge(width = 0.75),
+    width = 0.65,
+    colour = "black",
+    linewidth = 0.2
+  ) +
+  geom_errorbar(
+    aes(ymin = ymin, ymax = ymax),
+    position = position_dodge(width = 0.75),
+    width = 0.22,
+    linewidth = 0.3
+  ) +
+  geom_text(
+    data = star_pos,
+    aes(x = faprotax.function, y = x, label = stars),
+    inherit.aes = FALSE,
+    size = 4,
+    vjust = 0
+  ) +
+  scale_fill_manual(
+    values = c("Spring"="#6AA84F","Autumn"="#E69138","Winter"="#6D9EEB")
+  ) +
+  scale_y_continuous(
+    trans = scales::pseudo_log_trans(base = 10, sigma = eps),
+    breaks = c(0, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1),
+    labels = label_number()
+  ) +
+  labs(
+    title = "Seasonality of FAPROTAX functions — Arbacia lixula",
+    subtitle = "Mean ± SE. Kruskal–Wallis (BH): * p≤0.05, ** p≤0.01, *** p≤0.001",
+    x = "Function",
+    y = "Relative abundance (pseudo-log10)",
+    fill = "Season"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+    panel.grid.minor = element_blank(),
+    legend.position = "right"
+  )
+
+p_arb_season
+```
+
+### 
+FAPROTAX Paracentrotus
+
+This analysis characterizes seasonal variation in predicted microbial functions (FAPROTAX) within the coelomic fluid of *Paracentrotus lividus*. Relative abundances were averaged per season, and significant differences were assessed using Kruskal–Wallis tests with BH correction. The resulting bar plot displays the top 30 functions, showing mean ± SE across seasons and highlighting seasonally structured functional shifts.
+
+```{r}
+setwd("~/Desktop/Paper Urchin's microbiota")
+# Subset + Relative + Long
+
+ds <- "Paracentrotus lividus"
+
+par_samples <- metadata %>%
+  filter(Species == ds) %>%
+  pull(sample.id) %>%
+  unique()
+
+par_samples <- par_samples[par_samples %in% colnames(faprotax_raw)]
+
+f_par <- faprotax_raw[, par_samples, drop = FALSE]
+
+# Relative abundance per sample
+f_par_rel <- sweep(f_par, 2, colSums(f_par), "/")
+f_par_rel[is.na(f_par_rel)] <- 0
+f_par_rel <- f_par_rel[rowSums(f_par_rel) > 0, ]
+
+par_long <- f_par_rel %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("faprotax.function") %>%
+  pivot_longer(
+    -faprotax.function,
+    names_to = "sample.id",
+    values_to = "abundance"
+  ) %>%
+  left_join(metadata, by = "sample.id") %>%
+  filter(!is.na(Season))
+
+
+# SEASONALITY
+
+# Mean and SE
+par_sum <- par_long %>%
+  group_by(faprotax.function, Season) %>%
+  summarise(
+    mean = mean(abundance),
+    se   = sd(abundance) / sqrt(n()),
+    .groups = "drop"
+  ) %>%
+  group_by(faprotax.function) %>%
+  filter(max(mean) > 1e-4) %>%   
+  ungroup()
+
+# Order 
+
+fun_order <- par_sum %>%
+  group_by(faprotax.function) %>%
+  summarise(total = sum(mean), .groups = "drop") %>%
+  arrange(desc(total)) %>%
+  pull(faprotax.function)
+
+par_sum <- par_sum %>%
+  mutate(
+    faprotax.function = factor(faprotax.function, levels = fun_order),
+    Season = factor(Season, levels = c("Spring","Autumn","Winter"))
+  )
+
+# Kruskal and significant functions (marked with stars)
+
+par_kw <- par_long %>%
+  group_by(faprotax.function) %>%
+  summarise(
+    p = tryCatch(
+      kruskal.test(abundance ~ Season)$p.value,
+      error = function(e) NA_real_
+    ),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    p_adj = p.adjust(p, method = "BH"),
+    stars = case_when(
+      p_adj <= 0.001 ~ "***",
+      p_adj <= 0.01  ~ "**",
+      p_adj <= 0.05  ~ "*",
+      TRUE           ~ ""
+    )
+  )
+
+par_sum2 <- par_sum %>%
+  left_join(par_kw, by = "faprotax.function")
+
+# BARPLOT
+
+library(scales)
+
+eps <- 1e-6  # small value for pseudo-log 
+
+par_sum2_plot <- par_sum2 %>%
+  mutate(
+    ymin = pmax(mean - se, 0),
+    ymax = pmax(mean + se, 0)
+  )
+
+#  Top 30 by abudance
+topN <- 30
+top_fun <- par_sum2_plot %>%
+  group_by(faprotax.function) %>%
+  summarise(total = sum(mean), .groups="drop") %>%
+  arrange(desc(total)) %>%
+  slice_head(n = topN) %>%
+  pull(faprotax.function)
+
+par_sum2_plot <- par_sum2_plot %>%
+  filter(faprotax.function %in% top_fun) %>%
+  mutate(faprotax.function = factor(faprotax.function, levels = top_fun))
+
+star_pos <- par_sum2_plot %>%
+  group_by(faprotax.function) %>%
+  summarise(
+    x = max(ymax) * 1.25,
+    stars = first(stars),
+    .groups="drop"
+  ) %>%
+  filter(stars != "")
+
+p_par_season <- ggplot(
+  par_sum2_plot,
+  aes(x = faprotax.function, y = mean, fill = Season)
+) +
+  geom_col(
+    position = position_dodge(width = 0.75),
+    width = 0.65,
+    colour = "black",
+    linewidth = 0.2
+  ) +
+  geom_errorbar(
+    aes(ymin = ymin, ymax = ymax),
+    position = position_dodge(width = 0.75),
+    width = 0.22,
+    linewidth = 0.3
+  ) +
+  geom_text(
+    data = star_pos,
+    aes(x = faprotax.function, y = x, label = stars),
+    inherit.aes = FALSE,
+    size = 4,
+    vjust = 0
+  ) +
+  scale_fill_manual(
+    values = c("Spring"="#6AA84F","Autumn"="#E69138","Winter"="#6D9EEB")
+  ) +
+  scale_y_continuous(
+    trans = scales::pseudo_log_trans(base = 10, sigma = eps),
+    breaks = c(0, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1),
+    labels = label_number()
+  ) +
+  labs(
+    title = "Seasonality of FAPROTAX functions — Paracentrotus lividus",
+    subtitle = "Mean ± SE. Kruskal–Wallis (BH): * p≤0.05, ** p≤0.01, *** p≤0.001",
+    x = "Function",
+    y = "Relative abundance (pseudo-log10)",
+    fill = "Season"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+    panel.grid.minor = element_blank(),
+    legend.position = "right"
+  )
+
+p_par_season
+
+```
+
+### FAPROTAX Water samples
+
+This analysis characterizes seasonal variation in predicted microbial functions (FAPROTAX) of sea water samples. Relative abundances were averaged per season, and significant differences were assessed using Kruskal–Wallis tests with BH correction. The resulting bar plot displays the top 30 functions, showing mean ± SE across seasons and highlighting seasonally structured functional shifts.{r}
+
+```{r}
+# Subset + Relative + Long
+
+ds <- "Water sample"
+
+ws_samples <- metadata %>%
+  filter(Species == ds) %>%
+  pull(sample.id) %>%
+  unique()
+
+ws_samples <- ws_samples[ws_samples %in% colnames(faprotax_raw)]
+
+f_ws <- faprotax_raw[, ws_samples, drop = FALSE]
+
+# Relative abundance per sample
+f_ws_rel <- sweep(f_ws, 2, colSums(f_ws), "/")
+f_ws_rel[is.na(f_ws_rel)] <- 0
+f_ws_rel <- f_ws_rel[rowSums(f_ws_rel) > 0, ]
+
+ws_long <- f_ws_rel %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("faprotax.function") %>%
+  pivot_longer(
+    -faprotax.function,
+    names_to = "sample.id",
+    values_to = "abundance"
+  ) %>%
+  left_join(metadata, by = "sample.id") %>%
+  filter(!is.na(Season))
+
+
+# SEASONALITY
+
+# Mean and SE
+ws_sum <- ws_long %>%
+  group_by(faprotax.function, Season) %>%
+  summarise(
+    mean = mean(abundance),
+    se   = sd(abundance) / sqrt(n()),
+    .groups = "drop"
+  ) %>%
+  group_by(faprotax.function) %>%
+  filter(max(mean) > 1e-4) %>%   
+  ungroup()
+
+# Order 
+
+fun_order <- ws_sum %>%
+  group_by(faprotax.function) %>%
+  summarise(total = sum(mean), .groups = "drop") %>%
+  arrange(desc(total)) %>%
+  pull(faprotax.function)
+
+ws_sum <- ws_sum %>%
+  mutate(
+    faprotax.function = factor(faprotax.function, levels = fun_order),
+    Season = factor(Season, levels = c("Spring","Autumn","Winter"))
+  )
+
+# Kruskal and significant functions (marked with stars)
+
+ws_kw <- par_long %>%
+  group_by(faprotax.function) %>%
+  summarise(
+    p = tryCatch(
+      kruskal.test(abundance ~ Season)$p.value,
+      error = function(e) NA_real_
+    ),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    p_adj = p.adjust(p, method = "BH"),
+    stars = case_when(
+      p_adj <= 0.001 ~ "***",
+      p_adj <= 0.01  ~ "**",
+      p_adj <= 0.05  ~ "*",
+      TRUE           ~ ""
+    )
+  )
+
+ws_sum2 <- ws_sum %>%
+  left_join(ws_kw, by = "faprotax.function")
+
+# BARPLOT
+
+library(scales)
+
+eps <- 1e-6  # small value for pseudo-log 
+
+ws_sum2_plot <- ws_sum2 %>%
+  mutate(
+    ymin = pmax(mean - se, 0),
+    ymax = pmax(mean + se, 0)
+  )
+
+#  Top 30 by abudance
+topN <- 30
+top_fun <- ws_sum2_plot %>%
+  group_by(faprotax.function) %>%
+  summarise(total = sum(mean), .groups="drop") %>%
+  arrange(desc(total)) %>%
+  slice_head(n = topN) %>%
+  pull(faprotax.function)
+
+ws_sum2_plot <- ws_sum2_plot %>%
+  filter(faprotax.function %in% top_fun) %>%
+  mutate(faprotax.function = factor(faprotax.function, levels = top_fun))
+
+star_pos <- ws_sum2_plot %>%
+  group_by(faprotax.function) %>%
+  summarise(
+    x = max(ymax) * 1.25,
+    stars = first(stars),
+    .groups="drop"
+  ) %>%
+  filter(stars != "")
+
+p_ws_season <- ggplot(
+  ws_sum2_plot,
+  aes(x = faprotax.function, y = mean, fill = Season)
+) +
+  geom_col(
+    position = position_dodge(width = 0.75),
+    width = 0.65,
+    colour = "black",
+    linewidth = 0.2
+  ) +
+  geom_errorbar(
+    aes(ymin = ymin, ymax = ymax),
+    position = position_dodge(width = 0.75),
+    width = 0.22,
+    linewidth = 0.3
+  ) +
+  geom_text(
+    data = star_pos,
+    aes(x = faprotax.function, y = x, label = stars),
+    inherit.aes = FALSE,
+    size = 4,
+    vjust = 0
+  ) +
+  scale_fill_manual(
+    values = c("Spring"="#6AA84F","Autumn"="#E69138","Winter"="#6D9EEB")
+  ) +
+  scale_y_continuous(
+    trans = scales::pseudo_log_trans(base = 10, sigma = eps),
+    breaks = c(0, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1),
+    labels = label_number()
+  ) +
+  labs(
+    title = "Seasonality of FAPROTAX functions — Sea Water",
+    subtitle = "Mean ± SE. Kruskal–Wallis (BH): * p≤0.05, ** p≤0.01, *** p≤0.001",
+    x = "Function",
+    y = "Relative abundance (pseudo-log10)",
+    fill = "Season"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+    panel.grid.minor = element_blank(),
+    legend.position = "right"
+  )
+
+p_ws_season
+
+```
